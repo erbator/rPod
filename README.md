@@ -14,7 +14,7 @@ shows real album art inside your terminal, and converts and syncs music with a s
 ![Linux](https://img.shields.io/badge/Linux-first-fcc624?style=for-the-badge&logo=linux&logoColor=black)
 ![iPod](https://img.shields.io/badge/iPod-Video%205G%20%2F%205.5G-c0c0c0?style=for-the-badge&logo=apple&logoColor=black)
 ![Status](https://img.shields.io/badge/status-early%20but%20working-8b5cf6?style=for-the-badge)
-[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-ef9421?style=for-the-badge&logo=creativecommons&logoColor=white)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial-ef9421?style=for-the-badge)](LICENSE.md)
 
 <br>
 
@@ -356,8 +356,8 @@ Point it at a **copy** of an iPod (a folder with `iPod_Control/{iTunes,Artwork,D
 
 <div align="center">
 
-Licensed under **[CC BY-NC-SA 4.0](LICENSE)**: share and adapt it with credit,<br>
-not for commercial use, and under the same license.
+Licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE.md)**.<br>
+Free to use, change and share for any noncommercial purpose. Commercial use isn't allowed.
 
 <sub>Made for people who still think the click wheel was peak UI. 🎡</sub>
 
