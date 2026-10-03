@@ -70,7 +70,8 @@ shows real album art inside your terminal, and converts and syncs music with a s
 - **Drag & drop** files or folders straight onto the terminal window
 - Converts anything the iPod can't play with **ffmpeg**, in parallel
 - Lossless → **ALAC** or AAC/MP3. Hi-res is made iPod-safe automatically
-- Embedded covers, or `cover.jpg`/`folder.jpg` as a fallback
+- Embedded covers, or `cover.jpg`/`folder.jpg` as a fallback, or found online
+- Multi-artist tags are kept whole ("Nujabes, Fat Jon")
 - Skips songs already on the iPod, checks free space first
 
 </td>
@@ -113,7 +114,7 @@ Installs a static binary for **x86_64** or **ARM64 Linux** to `~/.local/bin`, ve
 
 ```bash
 # Pick a version or install location
-curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | RPOD_VERSION=v0.1.0 RPOD_INSTALL_DIR="$HOME/bin" sh
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | RPOD_VERSION=v0.2.0 RPOD_INSTALL_DIR="$HOME/bin" sh
 
 # Uninstall (keeps your settings and iPod database backups)
 curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/uninstall.sh | sh
@@ -259,12 +260,44 @@ Press <kbd>i</kbd> on a track, an album, an artist or a playlist, or mark tracks
 
 Covers come from Apple's iTunes catalogue in up to **3000×3000**, or from any image file you drop in.
 
-- <kbd>c</kbd> opens a picker with the album already searched: a grid of real cover images, the closest match marked ★. <kbd>Enter</kbd> applies it, <kbd>Tab</kbd> switches the store country (your system's country by default), and dropping an image file uses your own
-- <kbd>C</kbd> finds every album without art, searches for each, and lists the matches for review. Confident ones (high score *and* a clear winner) can be accepted all at once with <kbd>a</kbd>; ambiguous ones wait for you
-- In **Add music**, <kbd>c</kbd> picks a cover for a queued album and <kbd>C</kbd> finds covers for every queued album that has none
-- The iPod gets its own thumbnails, and the audio files get a 1000 px JPEG embedded (switch off with <kbd>f</kbd> in the editor)
+### <kbd>c</kbd>: pick one cover
 
-Searches are paced to Apple's limit (about 20 a minute) and cached for a week in `~/.cache/rpod`.
+A pop-up opens with the album already searched: a grid of real cover images, best match first and marked ★, unlikely ones dimmed.
+
+| Key | Action |
+|---|---|
+| <kbd>←→↑↓</kbd> | choose a cover |
+| <kbd>Enter</kbd> | apply it |
+| <kbd>b</kbd> | jump back to the best match |
+| <kbd>/</kbd> | type your own search |
+| <kbd>Tab</kbd> | switch store country (your system's country by default) |
+| *drop an image file* | use your own cover |
+
+### <kbd>C</kbd>: fix every missing cover
+
+rPod finds every album with tracks lacking art, searches for each in the background, and lists what it found:
+
+| Status | Meaning |
+|---|---|
+| `confident 99%` | strong match that clearly beats the alternatives |
+| `review 69%` | best guess, check it before accepting |
+| `no match` | nothing usable; press <kbd>Enter</kbd> to search by hand or drop an image |
+
+<kbd>y</kbd> accepts, <kbd>n</kbd> skips, <kbd>a</kbd> accepts every confident match, and <kbd>Ctrl</kbd>+<kbd>S</kbd> writes all accepted covers in one go, after a backup. Nothing is written before that.
+
+### In Add music
+
+<kbd>c</kbd> picks a cover for a queued album. <kbd>C</kbd> searches for every queued album without art and uses the confident matches automatically; the rest are left for <kbd>c</kbd>.
+
+### How matching works
+
+Long tags make bad search terms, so rPod tries up to three searches and merges the results: the main artist plus the album's core words, the album alone, then the artist's whole discography. Each result is scored on title (shared words as well as spelling), artist (any artist of a combined credit counts), track count and release year:
+
+- A matching title by a clearly different artist is treated as a different album, so the band *Fallen Angels* doesn't beat the *Fallen Angels* soundtrack
+- Titles in another script count as unknown rather than wrong, so a soundtrack Apple lists only under its Chinese title can still win on artist and track count
+- "Confident" needs a high score *and* a clear lead over the runner-up, so near-ties always wait for you
+
+The iPod gets its own thumbnails, and the audio files get a 1000 px JPEG embedded (switch off with <kbd>f</kbd> in the editor). Searches are paced to Apple's limit (about 20 a minute) and cached for a week in `~/.cache/rpod`.
 
 <br>
 
