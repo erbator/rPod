@@ -335,12 +335,6 @@ Point it at a **copy** of an iPod (a folder with `iPod_Control/{iTunes,Artwork,D
 
 <br>
 
-## 🤖 How rPod was built
-
-rPod was built with **[Claude Code](https://claude.com/claude-code)**. I chose the features, directed the design and tested it on my own iPod; Claude wrote most of the code. Commits are marked with a `Co-Authored-By` line.
-
-<br>
-
 <div align="center">
 
 **No license chosen yet.** All rights reserved until one is added.
