@@ -346,6 +346,13 @@ Point it at a **copy** of an iPod (a folder with `iPod_Control/{iTunes,Artwork,D
 
 <br>
 
+## 💛 Special thanks
+
+**[DarkAaronfox](https://github.com/DarkAaronfox)** for lending me his iPod Video 5.5G, the device rPod was built and tested against.
+Check out his project **[crabseek](https://github.com/DarkAaronfox/crabseek)**, a fast, keyboard-driven Soulseek client for the terminal, written in Rust.
+
+<br>
+
 ## 🙏 Acknowledgements
 
 - The **iPodLinux wiki** and **libgpod**, for years of reverse-engineering the iPod's formats
