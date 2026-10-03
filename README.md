@@ -1,12 +1,6 @@
 <div align="center">
 
-```
-           ____            __
-     _____/ __ \____  ____/ /
-    / ___/ /_/ / __ \/ __  / 
-   / /  / ____/ /_/ / /_/ /  
-  /_/  /_/    \____/\__,_/   
-```
+<img src="assets/logo.svg" alt="rPod" width="420">
 
 ### Your iPod, managed from the terminal. Fast.
 

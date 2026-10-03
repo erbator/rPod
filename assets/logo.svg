@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 118" width="330" height="118" role="img" aria-label="rPod">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <g font-family="ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+     font-size="18" font-weight="700" fill="url(#g)" xml:space="preserve">
+    <text x="8" y="24">         ____            __</text>
+    <text x="8" y="44">   _____/ __ \____  ____/ /</text>
+    <text x="8" y="64">  / ___/ /_/ / __ \/ __  / </text>
+    <text x="8" y="84"> / /  / ____/ /_/ / /_/ /  </text>
+    <text x="8" y="104">/_/  /_/    \____/\__,_/   </text>
+  </g>
+</svg>
