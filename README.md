@@ -29,8 +29,7 @@ shows real album art inside your terminal, and converts and syncs music with a s
 [Adding music](#-adding-music) ·
 [Compatibility](#-compatibility) ·
 [Performance](#-performance) ·
-[How it works](#-how-it-works) ·
-[Roadmap](#-roadmap)
+[How it works](#-how-it-works)
 
 </div>
 
@@ -319,21 +318,6 @@ Thumbnails are raw **RGB565 little-endian** pixels at an offset inside `.ithmb` 
 | `app.rs` · `ui.rs` · `importui.rs` | the TUI |
 
 </details>
-
-<br>
-
-## 🗺️ Roadmap
-
-- [x] Read iTunesDB, ArtworkDB and SysInfo
-- [x] Browse with album art in the terminal
-- [x] Add music with drag & drop, parallel conversion and covers
-- [x] Backups, atomic writes, verification
-- [ ] **Metadata editing** (single and batch, written to file and iPod)
-- [ ] **Album covers from the internet** (iTunes, MusicBrainz / Cover Art Archive, Deezer)
-- [ ] **Organizer**: rename/move by template, duplicates, a "problems" view
-- [ ] Delete tracks, edit playlists
-- [ ] **hash58** for iPod Classic 6G/7G and nano 3G/4G
-- [ ] Play count / rating sync-back
 
 <br>
 
