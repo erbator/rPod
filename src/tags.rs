@@ -71,6 +71,24 @@ pub fn write(path: &Path, e: &TrackEdit) -> Result<()> {
     Ok(())
 }
 
+/// Replace the file's front cover with a JPEG.
+pub fn embed_cover(path: &Path, jpeg: &[u8]) -> Result<()> {
+    use lofty::picture::{MimeType, Picture, PictureType};
+    let mut file = lofty::read_from_path(path).with_context(|| format!("reading {}", path.display()))?;
+    let tag_type = file.primary_tag_type();
+    if file.tag(tag_type).is_none() {
+        file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = file.tag_mut(tag_type).expect("tag inserted above");
+    tag.remove_picture_type(PictureType::CoverFront);
+    // Formats without picture types (MP4) keep "Other"; drop those too.
+    tag.remove_picture_type(PictureType::Other);
+    tag.push_picture(Picture::unchecked(jpeg.to_vec()).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
+    tag.save_to_path(path, WriteOptions::default())
+        .with_context(|| format!("writing cover to {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +124,34 @@ mod tests {
             assert_eq!(t.get_string(ItemKey::AlbumArtist), Some("The Band"), "{name}");
             assert_eq!(t.date().map(|d| d.year), Some(1994), "{name}");
             assert_eq!((t.track(), t.track_total()), (Some(3), Some(10)), "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn embeds_cover() {
+        let dir = std::env::temp_dir().join(format!("rpod-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 64, image::Rgb([0, 128, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .unwrap();
+        for (name, codec) in [("a.mp3", "libmp3lame"), ("b.m4a", "aac")] {
+            let path = dir.join(name);
+            let ok = std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-c:a", codec])
+                .arg(&path)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return;
+            }
+            embed_cover(&path, &jpeg).unwrap();
+            embed_cover(&path, &jpeg).unwrap(); // replacing, not stacking
+            let f = lofty::read_from_path(&path).unwrap();
+            let pics = f.primary_tag().unwrap().pictures();
+            assert_eq!(pics.len(), 1, "{name}");
+            assert_eq!(pics[0].data(), jpeg.as_slice(), "{name}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }

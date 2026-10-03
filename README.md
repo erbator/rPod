@@ -61,6 +61,7 @@ shows real album art inside your terminal, and converts and syncs music with a s
 - Live **`/` filter** on any column
 - Track details: format, bitrate, sample rate, size, plays, skips, rating
 - **Edit metadata** in a pop-up, for one track or a whole album at once
+- **Find covers online** in a grid of real images, or fix every missing cover in one go
 
 </td>
 <td width="50%" valign="top">
@@ -157,6 +158,8 @@ rpod "/run/media/$USER/IPOD" # or point at it explicitly
 | <kbd>/</kbd> | filter the current column |
 | <kbd>i</kbd> | **edit metadata** of the selected track, album, artist or playlist |
 | <kbd>space</kbd> | mark tracks to edit together |
+| <kbd>c</kbd> | **find a cover** for the selected album, track or marked tracks |
+| <kbd>C</kbd> | **fix missing covers** across the whole iPod |
 | <kbd>a</kbd> | **add music** |
 | <kbd>e</kbd> | eject the iPod safely |
 | <kbd>q</kbd> | quit |
@@ -249,6 +252,19 @@ Press <kbd>i</kbd> on a track, an album, an artist or a playlist, or mark tracks
 - Changed fields are marked <code>●</code> before you save
 - <kbd>n</kbd> numbers the tracks 1…n, <kbd>t</kbd> fills in the totals, <kbd>x</kbd> tidies stray spaces
 - <kbd>Ctrl</kbd>+<kbd>S</kbd> saves to the iPod's database (with a backup and a verification pass) and, unless you turn it off with <kbd>f</kbd>, into the audio files' own tags too
+
+<br>
+
+## 🖼️ Album covers
+
+Covers come from Apple's iTunes catalogue in up to **3000×3000**, or from any image file you drop in.
+
+- <kbd>c</kbd> opens a picker with the album already searched: a grid of real cover images, the closest match marked ★. <kbd>Enter</kbd> applies it, <kbd>Tab</kbd> switches the store country (your system's country by default), and dropping an image file uses your own
+- <kbd>C</kbd> finds every album without art, searches for each, and lists the matches for review. Confident ones (high score *and* a clear winner) can be accepted all at once with <kbd>a</kbd>; ambiguous ones wait for you
+- In **Add music**, <kbd>c</kbd> picks a cover for a queued album and <kbd>C</kbd> finds covers for every queued album that has none
+- The iPod gets its own thumbnails, and the audio files get a 1000 px JPEG embedded (switch off with <kbd>f</kbd> in the editor)
+
+Searches are paced to Apple's limit (about 20 a minute) and cached for a week in `~/.cache/rpod`.
 
 <br>
 
@@ -372,6 +388,7 @@ Check out his project **[crabseek](https://github.com/DarkAaronfox/crabseek)**, 
 
 - The **iPodLinux wiki** and **libgpod**, for years of reverse-engineering the iPod's formats
 - **[iOpenPod](https://github.com/TheRealSavi/iOpenPod)** (GPLv3), used as a reference for field layouts. No code was copied
+- **[Ben Dodson's iTunes Artwork Finder](https://bendodson.com/projects/itunes-artwork-finder/)**, for the artwork URL techniques
 - **[ratatui](https://ratatui.rs)**, **[ratatui-image](https://github.com/benjajaja/ratatui-image)** and **[lofty](https://github.com/Serial-ATA/lofty-rs)**
 
 <br>

@@ -2,6 +2,7 @@
 
 use crate::edit::{self, FIELDS, Field, Form, Kind, Report};
 use crate::itunesdb::Track;
+use crate::widgets::Input;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -19,66 +20,6 @@ const DIM: Color = Color::DarkGray;
 const CHANGED: Color = Color::Yellow;
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// A single-line text input with a cursor.
-struct Input {
-    chars: Vec<char>,
-    cur: usize,
-}
-
-impl Input {
-    fn new(s: &str) -> Self {
-        let chars: Vec<char> = s.chars().collect();
-        Self { cur: chars.len(), chars }
-    }
-
-    fn text(&self) -> String {
-        self.chars.iter().collect()
-    }
-
-    fn insert(&mut self, s: &str) {
-        for c in s.chars().filter(|c| !c.is_control()) {
-            self.chars.insert(self.cur, c);
-            self.cur += 1;
-        }
-    }
-
-    /// Returns false for keys it doesn't handle.
-    fn key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Left => self.cur = self.cur.saturating_sub(1),
-            KeyCode::Right => self.cur = (self.cur + 1).min(self.chars.len()),
-            KeyCode::Home => self.cur = 0,
-            KeyCode::End => self.cur = self.chars.len(),
-            KeyCode::Backspace if self.cur > 0 => {
-                self.cur -= 1;
-                self.chars.remove(self.cur);
-            }
-            KeyCode::Delete if self.cur < self.chars.len() => {
-                self.chars.remove(self.cur);
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.chars.drain(..self.cur);
-                self.cur = 0;
-            }
-            KeyCode::Char(c) => self.insert(&c.to_string()),
-            KeyCode::Backspace | KeyCode::Delete => {}
-            _ => return false,
-        }
-        true
-    }
-
-    fn spans(&self) -> Vec<Span<'static>> {
-        let before: String = self.chars[..self.cur].iter().collect();
-        let at = self.chars.get(self.cur).map_or(" ".to_string(), |c| c.to_string());
-        let after: String = self.chars.get(self.cur + 1..).map_or(String::new(), |s| s.iter().collect());
-        vec![
-            Span::styled(before, Style::new().fg(Color::White)),
-            Span::styled(at, Style::new().fg(Color::Black).bg(Color::White)),
-            Span::styled(after, Style::new().fg(Color::White)),
-        ]
-    }
-}
-
 pub struct EditView {
     root: PathBuf,
     title: String,
@@ -95,6 +36,8 @@ pub struct EditView {
     saving: Option<(Receiver<Result<Report, String>>, Instant)>,
     /// Set when the editor closes: `Some(report)` after a save.
     pub closed: Option<Option<Report>>,
+    /// The user pressed `c`: the app should open the cover picker.
+    pub wants_cover: bool,
 }
 
 impl EditView {
@@ -120,7 +63,20 @@ impl EditView {
             cover,
             saving: None,
             closed: None,
+            wants_cover: false,
         }
+    }
+
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn set_cover(&mut self, cover: Option<StatefulProtocol>) {
+        self.cover = cover;
     }
 
     fn field(&self) -> Field {
@@ -259,6 +215,7 @@ impl EditView {
             KeyCode::Char('u') | KeyCode::Backspace => {
                 self.form.values.remove(&f);
             }
+            KeyCode::Char('c') => self.wants_cover = true,
             KeyCode::Char('n') => self.form.auto_number = !self.form.auto_number,
             KeyCode::Char('x') => self.form.clean = !self.form.clean,
             KeyCode::Char('f') => self.write_files = !self.write_files,
@@ -314,6 +271,11 @@ impl EditView {
             Some(proto) => f.render_stateful_widget(StatefulImage::default().resize(Resize::Fit(None)), fs_cover, proto),
             None => f.render_widget(Paragraph::new("\n\n\n  no artwork").fg(DIM), fs_cover),
         }
+        let hint = Rect { y: fs_cover.y + fs_cover.height, height: 1, ..fs_cover };
+        f.render_widget(
+            Line::from(vec![Span::styled(" c ", Style::new().fg(ACCENT)), Span::styled("change cover", Style::new().fg(DIM))]),
+            hint,
+        );
 
         let mut lines = Vec::with_capacity(FIELDS.len() + 1);
         lines.push(Line::from(""));

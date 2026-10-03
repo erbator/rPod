@@ -236,6 +236,50 @@ pub fn add_images(art_dir: &Path, orig: &[u8], images: &[NewImage]) -> Result<(V
     Ok((splice(orig, &entries, images.len(), max_id + 1 + images.len() as u32)?, ids))
 }
 
+/// Give tracks new covers: their old image entries are removed and new ones
+/// added. The old pixels stay in the .ithmb files as unused space.
+pub fn replace_images(art_dir: &Path, orig: &[u8], images: &[NewImage]) -> Result<(Vec<u8>, Vec<u32>)> {
+    let tracks: std::collections::HashSet<u64> = images.iter().map(|im| im.track_dbid).collect();
+    add_images(art_dir, &remove_images(orig, &tracks)?, images)
+}
+
+/// Drop the image entries (mhii) belonging to the given tracks.
+fn remove_images(orig: &[u8], tracks: &std::collections::HashSet<u64>) -> Result<Vec<u8>> {
+    let mhfd = Chunk::at(orig, 0)?;
+    let mut sd = mhfd.first_child()?;
+    for i in 0..mhfd.u32(0x14) {
+        if sd.u16(0x0C) == 1 {
+            let mhli = sd.first_child()?;
+            let mut kept = Vec::new();
+            let mut count = 0u32;
+            let mut off = mhli.off + mhli.header_len();
+            for _ in 0..mhli.total_len() {
+                let ii = Chunk::at(orig, off)?;
+                ii.expect(b"mhii")?;
+                if !tracks.contains(&ii.u64(0x14)) {
+                    kept.extend_from_slice(&orig[ii.off..ii.end()]);
+                    count += 1;
+                }
+                off = ii.end();
+            }
+            let list_start = mhli.off + mhli.header_len();
+            let removed = (sd.end() - list_start - kept.len()) as u32;
+            let mut out = Vec::with_capacity(orig.len());
+            out.extend_from_slice(&orig[..list_start]);
+            out.extend_from_slice(&kept);
+            out.extend_from_slice(&orig[sd.end()..]);
+            set32(&mut out, 8, mhfd.u32(8) - removed);
+            set32(&mut out, sd.off + 8, sd.u32(8) - removed);
+            set32(&mut out, mhli.off + 8, count);
+            return Ok(out);
+        }
+        if i + 1 < mhfd.u32(0x14) {
+            sd = Chunk::at(orig, sd.end())?;
+        }
+    }
+    anyhow::bail!("ArtworkDB has no image list")
+}
+
 /// Insert new mhii entries at the end of the image list.
 fn splice(orig: &[u8], entries: &[u8], count: usize, next_id: u32) -> Result<Vec<u8>> {
     let mhfd = Chunk::at(orig, 0)?;
@@ -293,6 +337,36 @@ mod tests {
         // Existing art still decodes.
         let (dbid, _) = before.by_track.iter().next().unwrap();
         after.load(after.best_thumb(*dbid).unwrap()).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn replace_cover_swaps_the_entry() {
+        let Ok(root) = std::env::var("RPOD_TEST_IPOD") else { return };
+        let tmp = std::env::temp_dir().join(format!("rpod-art-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        for f in std::fs::read_dir(format!("{root}/iPod_Control/Artwork")).unwrap() {
+            let f = f.unwrap();
+            std::fs::copy(f.path(), tmp.join(f.file_name())).unwrap();
+        }
+        let orig = std::fs::read(tmp.join("ArtworkDB")).unwrap();
+        let before = artworkdb::parse(&orig).unwrap();
+        let (&dbid, old) = before.by_track.iter().next().unwrap();
+        let old_offsets: Vec<u32> = old.iter().map(|t| t.offset).collect();
+
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(50, 50, image::Rgb([255, 0, 0])));
+        let (db, ids) =
+            replace_images(&tmp, &orig, &[NewImage { track_dbid: dbid, image: Arc::new(img), src_size: 1 }]).unwrap();
+        std::fs::write(tmp.join("ArtworkDB"), &db).unwrap();
+        let after = artworkdb::read(&tmp).unwrap();
+
+        assert_eq!(after.by_track.len(), before.by_track.len(), "replaced, not added");
+        assert_eq!(u32::from_le_bytes(db[8..12].try_into().unwrap()) as usize, db.len());
+        let new = &after.by_track[&dbid];
+        assert!(new.iter().all(|t| !old_offsets.contains(&t.offset) || t.file != old[0].file));
+        assert!(ids[0] > 0);
+        let px = after.load(after.best_thumb(dbid).unwrap()).unwrap().to_rgb8();
+        assert!(px.get_pixel(10, 10)[0] > 240, "new red cover");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

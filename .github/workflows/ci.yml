@@ -1,0 +1,27 @@
+name: CI
+
+# Build the static release target and run the tests on every push, so a
+# broken build is caught before tagging a release.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools and ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y musl-tools ffmpeg
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build static binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl

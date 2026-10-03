@@ -154,6 +154,8 @@ pub struct Item {
     pub has_art: bool,
     /// A cover.jpg-style image next to the file.
     pub folder_art: bool,
+    /// A cover picked or found online; wins over embedded and folder art.
+    pub cover: Option<Arc<Vec<u8>>>,
     pub duplicate: bool,
     pub enabled: bool,
     pub status: Status,
@@ -161,7 +163,12 @@ pub struct Item {
 
 impl Item {
     pub fn will_have_art(&self, s: &Settings) -> bool {
-        self.has_art || (s.folder_art && self.folder_art)
+        self.cover.is_some() || self.has_art || (s.folder_art && self.folder_art)
+    }
+
+    /// Songs from one album share this, so a cover applies to all of them.
+    pub fn album_key(&self) -> (String, String) {
+        (self.meta.sort_artist().to_lowercase(), self.meta.album.to_lowercase())
     }
 
     /// The iPod Video plays MP3, AAC and ALAC up to 48 kHz / 16-bit.
@@ -349,6 +356,7 @@ fn probe(path: &Path, on_ipod: &HashSet<(String, String, String)>, dir_has_cover
         size: std::fs::metadata(path)?.len(),
         has_art,
         folder_art: !has_art && dir_has_cover,
+        cover: None,
         duplicate,
         enabled: true,
         status: Status::Pending,
@@ -616,7 +624,12 @@ fn prepare(
         let _ = std::fs::remove_file(&src);
     }
 
-    let art = find_art(&item.src, settings.folder_art).and_then(|bytes| decode_cover(bytes, art_cache));
+    let art = item
+        .cover
+        .as_ref()
+        .map(|b| b.to_vec())
+        .or_else(|| find_art(&item.src, settings.folder_art))
+        .and_then(|bytes| decode_cover(bytes, art_cache));
 
     let (kind, filetype) = kind_of(&dest, is_alac);
     let rel = dest.strip_prefix(root)?.to_string_lossy().into_owned();
@@ -762,5 +775,55 @@ mod tests {
         assert_eq!(parse_dropped(&format!("file://{}", s.replace(' ', "%20"))), vec![f.clone()]);
         assert_eq!(parse_dropped(&format!("'{s}' '{}'", dir.display())), vec![f.clone(), dir.clone()]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn picked_cover_is_used_on_import() {
+        let Ok(src) = std::env::var("RPOD_TEST_IPOD") else { return };
+        let root = std::env::temp_dir().join(format!("rpod-import-cover-{}", std::process::id()));
+        for dir in ["iTunes", "Artwork", "Device"] {
+            std::fs::create_dir_all(root.join("iPod_Control").join(dir)).unwrap();
+            for f in std::fs::read_dir(format!("{src}/iPod_Control/{dir}")).unwrap() {
+                let f = f.unwrap();
+                std::fs::copy(f.path(), root.join("iPod_Control").join(dir).join(f.file_name())).unwrap();
+            }
+        }
+        std::fs::create_dir_all(root.join("iPod_Control/Music/F00")).unwrap();
+        let songs = root.join("songs");
+        std::fs::create_dir_all(&songs).unwrap();
+        let mp3 = songs.join("bare.mp3");
+        let ok = Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "libmp3lame", "-metadata", "title=Bare Song", "-metadata", "album=No Art Album"])
+            .arg(&mp3)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: tests that set XDG_DATA_HOME serialize on TEST_ENV_LOCK.
+        unsafe { std::env::set_var("XDG_DATA_HOME", root.join("data")) };
+
+        let mut items = scan(&[mp3], &HashSet::new());
+        assert!(!items[0].will_have_art(&Settings::default()));
+        let mut png = Vec::new();
+        DynamicImage::ImageRgb8(image::RgbImage::from_pixel(300, 300, image::Rgb([250, 0, 250])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        items[0].cover = Some(Arc::new(png));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        run(root.clone(), items, Settings::default(), tx);
+        let finished = rx.iter().find_map(|p| match p {
+            Progress::Finished(r) => Some(r),
+            _ => None,
+        });
+        assert_eq!(finished, Some(Ok(1)));
+
+        let ipod = crate::device::Ipod::open(&root).unwrap();
+        let t = ipod.db.tracks.iter().find(|t| t.title == "Bare Song").unwrap();
+        let px = ipod.art.load(ipod.art.best_thumb(t.dbid).unwrap()).unwrap().to_rgb8();
+        assert!(px.get_pixel(50, 50)[0] > 240 && px.get_pixel(50, 50)[1] < 10, "picked cover used");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

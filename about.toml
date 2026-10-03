@@ -18,6 +18,8 @@ accepted = [
     "WTFPL",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    # Mozilla's CA certificates (webpki-roots), used to verify HTTPS to Apple.
+    "CDLA-Permissive-2.0",
 ]
 
 # rPod's own license (not a third-party one).

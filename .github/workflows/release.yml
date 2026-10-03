@@ -25,6 +25,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # ring (TLS crypto) compiles C code, which needs a musl C compiler.
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about

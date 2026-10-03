@@ -48,3 +48,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
+
+/// Tests that point XDG_DATA_HOME at a temp dir hold this so they don't race.
+#[cfg(test)]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -21,8 +21,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(f.area());
 
     draw_header(f, app, header);
-    if let Some(view) = &mut app.import {
+    if let Some(view) = &mut app.fix {
         view.draw(f, Rect { height: body.height + footer.height, ..body });
+    } else if let Some(view) = &mut app.import {
+        view.draw(f, Rect { height: body.height + footer.height, ..body });
+    }
+    if app.fix.is_some() || app.import.is_some() {
+        if let Some(view) = &mut app.cover {
+            view.draw(f, f.area());
+        }
         return;
     }
     let [cols_area, detail_area] =
@@ -33,14 +40,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(view) = &mut app.edit {
         view.draw(f, f.area());
     }
+    if let Some(view) = &mut app.cover {
+        view.draw(f, f.area());
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" rPod ", Style::new().bold().fg(Color::Black).bg(ACCENT)), Span::raw(" ")];
-    if app.import.is_some() {
-        spans.push(Span::styled("Add music", Style::new().fg(ACCENT).bold()));
+    let screen = if app.fix.is_some() {
+        Some("Fix missing covers")
+    } else if app.import.is_some() {
+        Some("Add music")
+    } else {
+        None
+    };
+    if let Some(name) = screen {
+        spans.push(Span::styled(name, Style::new().fg(ACCENT).bold()));
     }
-    for (i, tab) in Tab::ALL.iter().enumerate().filter(|_| app.import.is_none()) {
+    for (i, tab) in Tab::ALL.iter().enumerate().filter(|_| screen.is_none()) {
         let style = if *tab == app.tab {
             Style::new().fg(ACCENT).bold().underlined()
         } else {
@@ -287,6 +304,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     } else {
         let keys = [
             ("i", "edit"),
+            ("c", "cover"),
+            ("C", "fix covers"),
             ("space", "mark"),
             ("a", "add music"),
             ("e", "eject"),

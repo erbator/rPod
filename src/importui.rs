@@ -8,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Gauge, Paragraph, Row, Table, TableState, Wrap};
+use crate::itunesdb::Track;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +51,17 @@ pub struct ImportView {
     ffmpeg: bool,
     /// Set when the user leaves the screen; `true` if the library changed.
     pub closed: Option<bool>,
+    /// `c` was pressed: the app should open the cover picker for this album.
+    pub wants_picker: Option<(String, Vec<Track>)>,
+    picker_key: Option<(String, String)>,
+    cover_rx: Option<Receiver<CoverMsg>>,
+    /// (searched, total, found) while looking up covers online.
+    cover_progress: Option<(usize, usize, usize)>,
+}
+
+enum CoverMsg {
+    Found((String, String), Vec<u8>),
+    Progress(usize, usize, usize),
 }
 
 const OPTION_COUNT: usize = 6;
@@ -74,6 +86,10 @@ impl ImportView {
             message: None,
             ffmpeg: import::ffmpeg_available(),
             closed: None,
+            wants_picker: None,
+            picker_key: None,
+            cover_rx: None,
+            cover_progress: None,
         }
     }
 
@@ -145,7 +161,97 @@ impl ImportView {
                 }
             }
         }
+        if let Some(rx) = &self.cover_rx {
+            let mut finished = false;
+            while let Ok(msg) = rx.try_recv() {
+                changed = true;
+                match msg {
+                    CoverMsg::Found(key, bytes) => {
+                        let cover = Arc::new(bytes);
+                        for it in self.items.iter_mut().filter(|it| it.album_key() == key) {
+                            it.cover = Some(cover.clone());
+                        }
+                    }
+                    CoverMsg::Progress(done, total, found) => {
+                        self.cover_progress = Some((done, total, found));
+                        finished = done == total;
+                    }
+                }
+            }
+            if finished {
+                let (_, total, found) = self.cover_progress.take().unwrap_or_default();
+                self.cover_rx = None;
+                self.message = Some(match total - found {
+                    0 => format!("Found covers for all {total} album(s)."),
+                    left => format!("Found {found} of {total} album covers; pick the other {left} with c."),
+                });
+            }
+        }
         changed
+    }
+
+    /// The cover picker returned an image for the album `c` was pressed on.
+    pub fn set_picked_cover(&mut self, bytes: Vec<u8>) {
+        let Some(key) = self.picker_key.take() else { return };
+        let cover = Arc::new(bytes);
+        for it in self.items.iter_mut().filter(|it| it.album_key() == key) {
+            it.cover = Some(cover.clone());
+        }
+        self.message = Some("Cover set for that album.".into());
+    }
+
+    fn pick_cover(&mut self) {
+        let Some(sel) = self.table.selected().and_then(|i| self.items.get(i)) else { return };
+        let key = sel.album_key();
+        let tracks: Vec<Track> = self.items.iter().filter(|it| it.album_key() == key).map(|it| it.meta.clone()).collect();
+        let title = if sel.meta.album.is_empty() { sel.meta.title.clone() } else { sel.meta.album.clone() };
+        self.picker_key = Some(key);
+        self.wants_picker = Some((title, tracks));
+    }
+
+    /// Search iTunes for every queued album without art; confident matches
+    /// are applied automatically.
+    fn find_covers(&mut self) {
+        if self.cover_rx.is_some() {
+            return;
+        }
+        let mut albums: Vec<((String, String), String, String, usize)> = Vec::new();
+        for it in self.items.iter().filter(|it| !it.will_have_art(&self.settings)) {
+            let key = it.album_key();
+            match albums.iter_mut().find(|a| a.0 == key) {
+                Some(a) => a.3 += 1,
+                None => albums.push((key, it.meta.sort_artist().to_string(), it.meta.album.clone(), 1)),
+            }
+        }
+        if albums.is_empty() {
+            self.message = Some("Every queued song already has a cover.".into());
+            return;
+        }
+        let (tx, rx) = channel();
+        let country = crate::itunes::default_country();
+        let total = albums.len();
+        std::thread::spawn(move || {
+            let mut found = 0;
+            for (i, (key, artist, album, n)) in albums.into_iter().enumerate() {
+                let hit = crate::itunes::search(&format!("{artist} {album}"), &country)
+                    .ok()
+                    .and_then(|hits| {
+                        let (best, _, confident) = crate::itunes::best_match(&hits, &artist, &album, n)?;
+                        confident.then(|| hits[best].clone())
+                    });
+                if let Some(bytes) = hit.and_then(|h| crate::itunes::fetch_cover(&h).ok()) {
+                    found += 1;
+                    if tx.send(CoverMsg::Found(key, bytes)).is_err() {
+                        return;
+                    }
+                }
+                if tx.send(CoverMsg::Progress(i + 1, total, found)).is_err() {
+                    return;
+                }
+            }
+        });
+        self.cover_rx = Some(rx);
+        self.cover_progress = Some((0, total, 0));
     }
 
     fn running(&self) -> bool {
@@ -247,6 +353,8 @@ impl ImportView {
                 self.items.remove(sel);
                 self.table.select(if self.items.is_empty() { None } else { Some(sel.min(self.items.len() - 1)) });
             }
+            KeyCode::Char('c') => self.pick_cover(),
+            KeyCode::Char('C') => self.find_covers(),
             KeyCode::Char('D') => {
                 self.items.clear();
                 self.table.select(None);
@@ -469,8 +577,10 @@ impl ImportView {
             let color = if size > free { Color::Red } else { Color::Gray };
             lines.push(Line::from(format!(" Free: {} → {}", gb(free), gb(after))).fg(color));
         }
-        if no_art > 0 {
-            lines.push(Line::from(format!(" {no_art} without cover art (marked ·)")).fg(DIM));
+        if let Some((done, total, found)) = self.cover_progress {
+            lines.push(Line::from(format!(" Finding covers online… {done}/{total} ({found} found)")).fg(Color::Yellow));
+        } else if no_art > 0 {
+            lines.push(Line::from(format!(" {no_art} without cover (·): C finds them, c picks")).fg(DIM));
         }
         if !self.ffmpeg && conv > 0 {
             lines.push(Line::from(" ffmpeg not found — install it to convert").fg(Color::Red));
@@ -527,7 +637,7 @@ impl ImportView {
             let keys: &[(&str, &str)] = if self.focus == Pane::Options {
                 &[("↑↓", "option"), ("←→", "change"), ("tab", "queue"), ("s", "start"), ("esc", "back")]
             } else {
-                &[("drop", "add files"), ("o", "path"), ("space", "toggle"), ("a", "all"), ("d", "remove"), ("tab", "options"), ("enter", "start"), ("esc", "back")]
+                &[("drop", "add files"), ("o", "path"), ("space", "toggle"), ("d", "remove"), ("c", "cover"), ("C", "find covers"), ("tab", "options"), ("enter", "start"), ("esc", "back")]
             };
             Line::from(
                 keys.iter()

@@ -1,7 +1,9 @@
 //! TUI state: tabs of drill-down columns, filtering, and cover art caching.
 
+use crate::coverui::CoverPicker;
 use crate::device::Ipod;
 use crate::editui::EditView;
+use crate::fixui::{AlbumRow, FixView};
 use crate::import;
 use crate::importui::ImportView;
 use crate::library::Index;
@@ -97,6 +99,12 @@ pub struct App {
     pub art_pending: Option<(usize, Instant)>,
     pub import: Option<ImportView>,
     pub edit: Option<EditView>,
+    pub cover: Option<CoverPicker>,
+    pub fix: Option<FixView>,
+    /// The fix-covers row the open cover picker belongs to.
+    picker_for_fix: Option<usize>,
+    /// The open cover picker is choosing a cover for the Add music queue.
+    picker_for_import: bool,
     /// Tracks marked with space for batch editing.
     pub marked: HashSet<usize>,
     pub status: Option<String>,
@@ -119,6 +127,10 @@ impl App {
             art_pending: None,
             import: None,
             edit: None,
+            cover: None,
+            fix: None,
+            picker_for_fix: None,
+            picker_for_import: false,
             marked: HashSet::new(),
             status: None,
         };
@@ -265,10 +277,46 @@ impl App {
 
     /// Dropped files (Kitty pastes their paths) open the Add music screen.
     pub fn on_paste(&mut self, text: &str) {
-        match &mut self.edit {
-            Some(view) => view.on_paste(text),
-            None => self.open_import().on_paste(text),
+        if let Some(view) = &mut self.cover {
+            view.on_paste(text);
+        } else if let Some(view) = &mut self.edit {
+            view.on_paste(text);
+        } else {
+            self.open_import().on_paste(text);
         }
+    }
+
+    /// Albums with tracks lacking cover art, for "fix missing covers".
+    fn open_fix(&mut self) {
+        let rows: Vec<AlbumRow> = self
+            .index
+            .albums
+            .iter()
+            .filter_map(|a| {
+                let missing: Vec<crate::itunesdb::Track> = a
+                    .tracks
+                    .iter()
+                    .map(|&t| &self.ipod.db.tracks[t])
+                    .filter(|t| !self.ipod.art.by_track.contains_key(&t.dbid))
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| AlbumRow::new(a.title.clone(), a.artist.clone(), missing))
+            })
+            .collect();
+        if rows.is_empty() {
+            self.status = Some("Every album already has a cover.".into());
+            return;
+        }
+        let write_files = import::Settings::load().write_tags;
+        self.fix = Some(FixView::new(self.ipod.root.clone(), rows, self.picker.clone(), write_files));
+    }
+
+    fn open_cover_picker(&mut self, title: String, tracks: Vec<crate::itunesdb::Track>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let write_files = import::Settings::load().write_tags;
+        self.cover = Some(CoverPicker::new(self.ipod.root.clone(), title, tracks, self.picker.clone(), write_files));
     }
 
     /// The tracks `i` edits: the marked ones, else everything under the
@@ -314,6 +362,37 @@ impl App {
     /// Poll background work. Returns true if a redraw is needed.
     pub fn tick(&mut self) -> bool {
         let art = self.load_pending_art();
+        if let Some(view) = &mut self.cover {
+            let changed = view.tick();
+            if let Some(result) = view.closed.take() {
+                self.cover = None;
+                let fix_row = self.picker_for_fix.take();
+                if std::mem::take(&mut self.picker_for_import) {
+                    if let (Some(view), Some((_, image))) = (&mut self.import, result) {
+                        view.set_picked_cover(image);
+                    }
+                    return true;
+                }
+                if let Some((report, image)) = result {
+                    if let (Some(fix), Some(row)) = (&mut self.fix, fix_row) {
+                        fix.mark_done(row);
+                    }
+                    if let Some(edit) = &mut self.edit {
+                        let proto = image::load_from_memory(&image)
+                            .ok()
+                            .map(|img| self.picker.new_resize_protocol(img.thumbnail(400, 400)));
+                        edit.set_cover(proto);
+                    }
+                    self.reload();
+                    self.status = Some(match report.file_errors.len() {
+                        0 => format!("New cover on {} track(s).", report.tracks),
+                        n => format!("New cover on {} track(s); {n} file(s) failed: {}", report.tracks, report.file_errors[0]),
+                    });
+                }
+                return true;
+            }
+            return changed || art;
+        }
         if let Some(view) = &mut self.edit {
             let animating = view.tick();
             if let Some(result) = view.closed.take() {
@@ -335,6 +414,21 @@ impl App {
                 return true;
             }
             return animating || art;
+        }
+        if let Some(view) = &mut self.fix {
+            let changed = view.tick();
+            if let Some(result) = view.closed.take() {
+                self.fix = None;
+                if let Some(report) = result {
+                    self.reload();
+                    self.status = Some(match report.file_errors.len() {
+                        0 => format!("Added covers to {} track(s).", report.tracks),
+                        n => format!("Added covers to {} track(s); {n} file(s) failed: {}", report.tracks, report.file_errors[0]),
+                    });
+                }
+                return true;
+            }
+            return changed || art;
         }
         let Some(view) = &mut self.import else { return art };
         let changed = view.tick() || art;
@@ -378,13 +472,40 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.status = None;
+        if let Some(view) = &mut self.cover {
+            view.on_key(key);
+            self.tick();
+            return;
+        }
         if let Some(view) = &mut self.edit {
             view.on_key(key);
+            if std::mem::take(&mut view.wants_cover) {
+                let (title, tracks) = (view.title().to_string(), view.tracks().to_vec());
+                self.open_cover_picker(title, tracks);
+            }
+            self.tick();
+            return;
+        }
+        if let Some(view) = &mut self.fix {
+            view.on_key(key);
+            if let Some(row) = view.wants_picker.take() {
+                if let Some((title, tracks)) = view.row_tracks(row).map(|(t, tr)| (t.to_string(), tr.to_vec())) {
+                    self.picker_for_fix = Some(row);
+                    self.open_cover_picker(title, tracks);
+                }
+            }
             self.tick();
             return;
         }
         if let Some(view) = &mut self.import {
             view.on_key(key);
+            if let Some((title, tracks)) = view.wants_picker.take() {
+                self.open_cover_picker(title, tracks);
+                if let Some(p) = &mut self.cover {
+                    p.choose_only = true;
+                    self.picker_for_import = true;
+                }
+            }
             self.tick();
             return;
         }
@@ -434,6 +555,13 @@ impl App {
                 self.open_import();
             }
             KeyCode::Char('i') => self.open_editor(),
+            KeyCode::Char('C') => self.open_fix(),
+            KeyCode::Char('c') if !ctrl => {
+                if let Some((title, tracks)) = self.edit_targets() {
+                    let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();
+                    self.open_cover_picker(title, tracks);
+                }
+            }
             KeyCode::Char(' ') => {
                 if let Some(Item::Track(t)) = self.cols[self.focus].selected() {
                     if !self.marked.remove(&t) {

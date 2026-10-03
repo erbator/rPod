@@ -246,7 +246,8 @@ mod tests {
     #[test]
     fn batch_edit_album_saves_and_verifies() {
         let Some(root) = scratch_root() else { return };
-        // SAFETY: tests in this module don't read XDG_DATA_HOME concurrently.
+        let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: tests that set XDG_DATA_HOME serialize on TEST_ENV_LOCK.
         unsafe { std::env::set_var("XDG_DATA_HOME", root.join("data")) };
         let db = itunesdb::read(&store::itunesdb_path(&root)).unwrap();
         let album = db.tracks[0].album.clone();
