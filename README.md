@@ -1,8 +1,7 @@
 <div align="center">
 
 <img src="assets/logo.svg" alt="rPod" width="420">
-ㅤ
-ㅤ
+<br>
 <img src="showcase.gif" alt="rPod" width="1000" align="center">
 
 ### Your iPod, managed from the terminal. Fast.
