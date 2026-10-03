@@ -20,6 +20,8 @@ const MARGIN: f32 = 0.05;
 
 #[derive(Debug, Clone)]
 pub struct AlbumHit {
+    /// Apple's collection id, for merging results from several searches.
+    pub id: u64,
     pub album: String,
     pub artist: String,
     pub year: u32,
@@ -54,6 +56,7 @@ struct Response {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawHit {
+    collection_id: Option<u64>,
     collection_name: Option<String>,
     artist_name: Option<String>,
     artwork_url100: Option<String>,
@@ -66,12 +69,19 @@ fn parse(json: &[u8]) -> Result<Vec<AlbumHit>> {
     Ok(r.results
         .into_iter()
         .filter_map(|h| {
+            let art100 = h.artwork_url100?;
             Some(AlbumHit {
+                id: h.collection_id.unwrap_or_else(|| {
+                    use std::hash::{Hash, Hasher};
+                    let mut s = std::collections::hash_map::DefaultHasher::new();
+                    art100.hash(&mut s);
+                    s.finish()
+                }),
                 album: h.collection_name?,
                 artist: h.artist_name.unwrap_or_default(),
                 year: h.release_date.as_deref().and_then(|d| d.get(..4)?.parse().ok()).unwrap_or(0),
                 tracks: h.track_count.unwrap_or(0),
-                art100: h.artwork_url100?,
+                art100,
             })
         })
         .collect())
@@ -92,14 +102,15 @@ fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(30))).build())
 }
 
-fn cache_path(term: &str, country: &str) -> Option<PathBuf> {
+fn cache_path(term: &str, country: &str, by_artist: bool) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     term.to_lowercase().hash(&mut h);
-    Some(base.join("rpod/itunes").join(format!("{country}-{:016x}.json", h.finish())))
+    let kind = if by_artist { "artist" } else { "term" };
+    Some(base.join("rpod/itunes").join(format!("{country}-{kind}-{:016x}.json", h.finish())))
 }
 
 /// Wait so searches stay under Apple's rate limit. Returns once a slot is free.
@@ -115,43 +126,108 @@ fn pace() {
     *last = Some(Instant::now());
 }
 
-/// Whether `search` would be answered from the cache (no network, no wait).
-pub fn is_cached(term: &str, country: &str) -> bool {
-    cache_path(term, country)
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| SystemTime::now().duration_since(t).ok())
-        .is_some_and(|age| age < CACHE_TTL)
+fn cached(path: &Option<PathBuf>) -> Option<Vec<u8>> {
+    let p = path.as_ref()?;
+    let age = SystemTime::now().duration_since(std::fs::metadata(p).ok()?.modified().ok()?).ok()?;
+    (age < CACHE_TTL).then(|| std::fs::read(p).ok()).flatten()
 }
 
-pub fn search(term: &str, country: &str) -> Result<Vec<AlbumHit>> {
-    let cache = cache_path(term, country);
-    if is_cached(term, country) {
-        if let Some(Ok(bytes)) = cache.as_ref().map(std::fs::read) {
-            if let Ok(hits) = parse(&bytes) {
-                return Ok(hits);
-            }
-        }
+/// One search request, answered from the cache when possible.
+fn request(term: &str, country: &str, by_artist: bool) -> Result<Vec<AlbumHit>> {
+    let cache = cache_path(term, country, by_artist);
+    if let Some(hits) = cached(&cache).and_then(|b| parse(&b).ok()) {
+        return Ok(hits);
     }
     pace();
-    let bytes = agent()
+    let mut req = agent()
         .get("https://itunes.apple.com/search")
         .query("term", term)
         .query("entity", "album")
-        .query("country", country)
-        .query("limit", "25")
-        .call()
-        .context("searching iTunes")?
-        .body_mut()
-        .with_config()
-        .limit(5 << 20)
-        .read_to_vec()?;
+        .query("country", country);
+    req = if by_artist { req.query("attribute", "artistTerm").query("limit", "50") } else { req.query("limit", "25") };
+    let bytes = req.call().context("searching iTunes")?.body_mut().with_config().limit(5 << 20).read_to_vec()?;
     let hits = parse(&bytes)?;
     if let Some(p) = cache {
         let _ = std::fs::create_dir_all(p.parent().unwrap());
         let _ = std::fs::write(p, &bytes);
     }
     Ok(hits)
+}
+
+/// A free-text album search (what the user types in the picker).
+pub fn search(term: &str, country: &str) -> Result<Vec<AlbumHit>> {
+    request(term, country, false)
+}
+
+/// What we're looking for: the album as it's tagged on the iPod.
+#[derive(Clone, Debug, Default)]
+pub struct Wanted {
+    pub artist: String,
+    pub album: String,
+    pub year: u32,
+    pub tracks: usize,
+}
+
+impl Wanted {
+    pub fn from_tracks(tracks: &[crate::itunesdb::Track]) -> Self {
+        let first = tracks.first().cloned().unwrap_or_default();
+        let artist = if first.album_artist.is_empty() { first.artist } else { first.album_artist };
+        Self { artist, album: first.album, year: tracks.iter().map(|t| t.year).max().unwrap_or(0), tracks: tracks.len() }
+    }
+
+    /// The searches to try, most specific first. Long tags make bad search
+    /// terms (Apple returns unrelated popular albums when too many words
+    /// don't match), so they're trimmed to the main artist and the album's
+    /// core words. The last resort lists the artist's whole discography,
+    /// which finds albums Apple titles differently (e.g. in another language).
+    fn searches(&self) -> Vec<(String, bool)> {
+        let artist = primary_artist(&self.artist);
+        let album = query_words(&self.album);
+        let mut out: Vec<(String, bool)> = Vec::new();
+        let mut push = |term: String, by_artist: bool| {
+            let term = term.trim().to_string();
+            if !term.is_empty() && !out.iter().any(|(t, b)| t.eq_ignore_ascii_case(&term) && *b == by_artist) {
+                out.push((term, by_artist));
+            }
+        };
+        push(format!("{artist} {album}"), false);
+        if album.split_whitespace().count() >= 2 {
+            push(album.clone(), false);
+        }
+        let generic = ["various artists", "unknown artist", "soundtrack", "va"];
+        if !artist.is_empty() && !generic.contains(&artist.to_lowercase().as_str()) {
+            push(artist, true);
+        }
+        out
+    }
+}
+
+/// Run the searches for `w` in order, merging results. After each search
+/// `progress` gets everything found so far; returning true stops early.
+pub fn find(w: &Wanted, country: &str, mut progress: impl FnMut(&[AlbumHit]) -> bool) -> Result<Vec<AlbumHit>> {
+    let mut all: Vec<AlbumHit> = Vec::new();
+    let mut last_err = None;
+    let mut any_ok = false;
+    for (term, by_artist) in w.searches() {
+        match request(&term, country, by_artist) {
+            Ok(hits) => {
+                any_ok = true;
+                for h in hits {
+                    if !all.iter().any(|x| x.id == h.id) {
+                        all.push(h);
+                    }
+                }
+                if progress(&all) {
+                    break;
+                }
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    match (any_ok, last_err) {
+        (false, Some(e)) => Err(e),
+        _ => Ok(all),
+    }
 }
 
 pub fn download(url: &str) -> Result<Vec<u8>> {
@@ -178,6 +254,49 @@ pub fn fetch_cover(hit: &AlbumHit) -> Result<Vec<u8>> {
 
 // ---------------------------------------------------------------- matching
 
+/// Separators between artists in a combined artist string.
+const ARTIST_SEPARATORS: &[&str] =
+    &[";", "/", ",", " & ", " feat. ", " feat ", " ft. ", " ft ", " featuring ", " x ", " with ", " and ", " vs. ", " vs "];
+
+fn split_artists(s: &str) -> Vec<String> {
+    let mut parts = vec![s.to_lowercase()];
+    for sep in ARTIST_SEPARATORS {
+        parts = parts.iter().flat_map(|p| p.split(sep).map(str::to_string).collect::<Vec<_>>()).collect();
+    }
+    parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+}
+
+/// The first artist of a combined credit, as typed (for search terms).
+fn primary_artist(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let cut = ARTIST_SEPARATORS.iter().filter_map(|sep| lower.find(sep)).min().unwrap_or(s.len());
+    s[..cut].trim().to_string()
+}
+
+/// An album title trimmed to words worth searching for: no bracketed
+/// extras, edition noise, disc numbers or punctuation.
+fn query_words(album: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for c in album.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = (depth - 1).max(0),
+            _ if depth > 0 => {}
+            c if c.is_alphanumeric() || c == '\'' => out.push(c),
+            _ => out.push(' '),
+        }
+    }
+    let noise = [
+        "deluxe", "edition", "remastered", "remaster", "expanded", "anniversary", "bonus", "ost", "soundtrack",
+        "disc", "cd", "ep", "single",
+    ];
+    let words: Vec<&str> = out.split_whitespace().filter(|w| !noise.contains(&w.to_lowercase().as_str())).collect();
+    // "Disc 2" leaves a lone digit behind.
+    let words: Vec<&str> = words.into_iter().filter(|w| !(w.len() == 1 && w.chars().all(|c| c.is_ascii_digit()))).collect();
+    if words.is_empty() { album.trim().to_string() } else { words.join(" ") }
+}
+
 /// Lowercase letters and digits only, minus edition noise words. Bracketed
 /// text is kept: "(Blue Album)" vs "(Green Album)" is the whole difference.
 fn normalize(s: &str) -> String {
@@ -187,15 +306,15 @@ fn normalize(s: &str) -> String {
         .collect();
     let noise = [
         "deluxe", "edition", "remastered", "remaster", "expanded", "version", "anniversary", "bonus", "track",
-        "tracks", "explicit", "clean", "ep", "single", "the",
+        "tracks", "explicit", "clean", "ep", "single", "the", "ost", "original", "motion", "picture", "soundtrack",
     ];
     let is_year = |w: &str| w.len() == 4 && (w.starts_with("19") || w.starts_with("20")) && w.chars().all(|c| c.is_ascii_digit());
     out.split_whitespace().filter(|w| !noise.contains(w) && !is_year(w)).collect::<Vec<_>>().join(" ")
 }
 
-/// 0..1 similarity from edit distance.
-fn similarity(a: &str, b: &str) -> f32 {
-    let (a, b): (Vec<char>, Vec<char>) = (normalize(a).chars().collect(), normalize(b).chars().collect());
+/// 0..1 similarity from edit distance of the normalized strings.
+fn edit_similarity(a: &str, b: &str) -> f32 {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     if a.is_empty() && b.is_empty() {
         return 1.0;
     }
@@ -210,21 +329,71 @@ fn similarity(a: &str, b: &str) -> f32 {
     1.0 - prev[b.len()] as f32 / a.len().max(b.len()) as f32
 }
 
-/// How well a result matches an album we have (0..1).
-pub fn score(hit: &AlbumHit, artist: &str, album: &str, track_count: usize) -> f32 {
-    let tracks = if hit.tracks == 0 || track_count == 0 {
+/// Shared-word similarity (Dice coefficient). Long titles that word things
+/// differently ("OST Departure" vs "Music Record Departure") score fairly here
+/// where letter-by-letter comparison falls apart.
+fn word_similarity(a: &str, b: &str) -> f32 {
+    let (a, b): (Vec<&str>, Vec<&str>) = (a.split_whitespace().collect(), b.split_whitespace().collect());
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let shared = a.iter().filter(|w| b.contains(w)).count();
+    2.0 * shared as f32 / (a.len() + b.len()) as f32
+}
+
+fn similarity(a: &str, b: &str) -> f32 {
+    let (a, b) = (normalize(a), normalize(b));
+    edit_similarity(&a, &b).max(word_similarity(&a, &b))
+}
+
+/// Best match between any artist of one credit and any of the other, so
+/// "Nujabes / Fat Jon the Ample Soul Physician" matches "Nujabes/fat jon".
+fn artist_similarity(a: &str, b: &str) -> f32 {
+    let whole = similarity(a, b);
+    let (pa, pb) = (split_artists(a), split_artists(b));
+    pa.iter().flat_map(|x| pb.iter().map(move |y| similarity(x, y))).fold(whole, f32::max)
+}
+
+/// Titles in different scripts ("Fallen Angels" vs "墮落天使") can't be
+/// compared by spelling at all.
+fn same_script(a: &str, b: &str) -> bool {
+    let latin = |s: &str| normalize(s).chars().any(|c| c.is_ascii_alphanumeric());
+    latin(a) == latin(b)
+}
+
+fn generic_artist(a: &str) -> bool {
+    let a = a.trim().to_lowercase();
+    a.is_empty() || ["various artists", "various", "va", "unknown artist", "soundtrack"].contains(&a.as_str())
+}
+
+/// How well a result matches the album we have (0..1).
+pub fn score(hit: &AlbumHit, w: &Wanted) -> f32 {
+    let tracks = if hit.tracks == 0 || w.tracks == 0 {
         0.5
     } else {
-        let (a, b) = (hit.tracks as f32, track_count as f32);
+        let (a, b) = (hit.tracks as f32, w.tracks as f32);
         a.min(b) / a.max(b)
     };
-    0.55 * similarity(&hit.album, album) + 0.35 * similarity(&hit.artist, artist) + 0.10 * tracks
+    let year = match (hit.year, w.year) {
+        (0, _) | (_, 0) => 0.5,
+        (a, b) => match a.abs_diff(b) {
+            0 => 1.0,
+            1 => 0.8,
+            2..=3 => 0.4,
+            _ => 0.0,
+        },
+    };
+    let album = if same_script(&hit.album, &w.album) { similarity(&hit.album, &w.album) } else { 0.5 };
+    let artist = artist_similarity(&hit.artist, &w.artist);
+    // The right title by a clearly different artist is a different album
+    // (a band called "Fallen Angels" is not the Fallen Angels soundtrack).
+    let gate = if generic_artist(&w.artist) || generic_artist(&hit.artist) { 1.0 } else { (0.4 + artist).min(1.0) };
+    (0.5 * album + 0.3 * artist + 0.1 * tracks + 0.1 * year) * gate
 }
 
 /// Index of the best result, its score, and whether it's confident.
-pub fn best_match(hits: &[AlbumHit], artist: &str, album: &str, track_count: usize) -> Option<(usize, f32, bool)> {
-    let mut scored: Vec<(usize, f32)> =
-        hits.iter().enumerate().map(|(i, h)| (i, score(h, artist, album, track_count))).collect();
+pub fn best_match(hits: &[AlbumHit], w: &Wanted) -> Option<(usize, f32, bool)> {
+    let mut scored: Vec<(usize, f32)> = hits.iter().enumerate().map(|(i, h)| (i, score(h, w))).collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let (best, top) = *scored.first()?;
     let runner_up = scored.get(1).map_or(0.0, |s| s.1);
@@ -236,18 +405,26 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = r#"{"resultCount":2,"results":[
-      {"wrapperType":"collection","collectionType":"Album","artistName":"Weezer",
+      {"wrapperType":"collection","collectionType":"Album","collectionId":1,"artistName":"Weezer",
        "collectionName":"Weezer (Blue Album)","trackCount":10,"releaseDate":"1994-05-10T07:00:00Z",
        "artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/100x100bb.jpg"},
-      {"wrapperType":"collection","artistName":"Weezer","collectionName":"Pinkerton (Deluxe Edition)",
+      {"wrapperType":"collection","collectionId":2,"artistName":"Weezer","collectionName":"Pinkerton (Deluxe Edition)",
        "trackCount":35,"releaseDate":"1996-09-24T07:00:00Z",
        "artworkUrl100":"https://is3-ssl.mzstatic.com/image/thumb/Music/y.jpg/100x100bb.jpg"}]}"#;
+
+    fn hit(artist: &str, album: &str, year: u32, tracks: u32) -> AlbumHit {
+        AlbumHit { id: 0, album: album.into(), artist: artist.into(), year, tracks, art100: String::new() }
+    }
+
+    fn want(artist: &str, album: &str, year: u32, tracks: usize) -> Wanted {
+        Wanted { artist: artist.into(), album: album.into(), year, tracks }
+    }
 
     #[test]
     fn parses_and_rewrites_urls() {
         let hits = parse(SAMPLE.as_bytes()).unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!((hits[0].year, hits[0].tracks), (1994, 10));
+        assert_eq!((hits[0].id, hits[0].year, hits[0].tracks), (1, 1994, 10));
         assert_eq!(
             hits[0].preview_url(),
             "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/600x600bb.jpg"
@@ -256,32 +433,82 @@ mod tests {
             hits[0].hires_url(),
             "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/3000x3000bb.jpg"
         );
-        assert_eq!(
-            hits[0].original_url().unwrap(),
-            "https://a5.mzstatic.com/us/r1000/0/Music125/v4/aa/bb/cc/x.jpg"
-        );
+        assert_eq!(hits[0].original_url().unwrap(), "https://a5.mzstatic.com/us/r1000/0/Music125/v4/aa/bb/cc/x.jpg");
     }
 
     #[test]
-    fn scores_the_right_album_highest() {
-        let hits = parse(SAMPLE.as_bytes()).unwrap();
-        let blue = score(&hits[0], "Weezer", "Weezer (Blue Album)", 10);
-        let pink = score(&hits[1], "Weezer", "Weezer (Blue Album)", 10);
-        assert!(blue >= CONFIDENT, "{blue}");
-        assert!(pink < blue);
-        assert!(score(&hits[1], "Weezer", "Pinkerton", 35) > CONFIDENT, "edition noise ignored");
-        let green = AlbumHit { album: "Weezer (Green Album)".into(), ..hits[0].clone() };
-        assert!(score(&green, "Weezer", "Weezer (Blue Album)", 10) < blue, "bracket text still counts");
-
-        let remaster = AlbumHit { album: "Weezer (2024 Remaster)".into(), ..hits[0].clone() };
-        assert!(score(&remaster, "Weezer", "Weezer", 10) > 0.95, "years and remaster noise ignored");
-
-        // Two near-identical candidates: best is found, but not confident.
-        let teal = AlbumHit { album: "Weezer (Teal Album)".into(), ..hits[0].clone() };
-        let (_, _, confident) = best_match(&[green, teal], "Weezer", "Weezer (Blue Album)", 10).unwrap();
-        assert!(!confident);
-        let (i, _, confident) = best_match(&hits, "Weezer", "Weezer (Blue Album)", 10).unwrap();
+    fn exact_album_is_confident() {
+        let w = want("Weezer", "Weezer (Blue Album)", 1994, 10);
+        let hits = [hit("Weezer", "Weezer (Blue Album)", 1994, 10), hit("Weezer", "Weezer (Green Album)", 2001, 10)];
+        let (i, _, confident) = best_match(&hits, &w).unwrap();
         assert!(i == 0 && confident);
+    }
+
+    #[test]
+    fn near_identical_candidates_are_not_confident() {
+        // Apple has no "Blue Album" by that name; Green and Teal tie.
+        let w = want("Weezer", "Weezer (Blue Album)", 0, 10);
+        let hits = [hit("Weezer", "Weezer (Green Album)", 2001, 10), hit("Weezer", "Weezer (Teal Album)", 2019, 10)];
+        assert!(!best_match(&hits, &w).unwrap().2);
+    }
+
+    #[test]
+    fn long_titles_and_combined_artists_match() {
+        // Real case: tagged "OST Departure", Apple says "Music Record Departure".
+        let w = want("Nujabes / Fat Jon the Ample Soul Physician", "Samurai Champloo OST Departure", 2004, 14);
+        let hits = [
+            hit("Nujabes/fat jon", "Samurai Champloo Music Record Departure", 2004, 14),
+            hit("Nujabes", "Luv(sic) Hexalogy", 2015, 6),
+            hit("Geek Music", "Samurai Champloo - Battle Cry - Main Theme - Single", 2016, 1),
+        ];
+        let (i, top, confident) = best_match(&hits, &w).unwrap();
+        assert_eq!(i, 0);
+        assert!(top > 0.8 && confident, "{top}");
+    }
+
+    #[test]
+    fn translated_title_found_by_artist_tracks_and_year() {
+        // Real case: Apple lists Fallen Angels under its Chinese title.
+        let w = want("Frankie Chan & Roel A. Garcia", "Fallen Angels (OST)", 0, 19);
+        let hits = [
+            hit("Frankie Chan, Roel A. Garcia & 杜可風", "東邪西毒 (電影原聲帶)", 1994, 15),
+            hit("Roel A. Gracia & Frankie Chan", "墮落天使(電影原聲大碟)", 2016, 18),
+            hit("Frankie Jordan", "Tu Parles Trop - Single", 1961, 3),
+            // Same title, wrong artist: the band "Fallen Angels".
+            hit("Fallen Angels", "Fallen Angels", 1984, 16),
+            hit("Bob Dylan", "Fallen Angels", 2016, 12),
+        ];
+        let (i, _, confident) = best_match(&hits, &w).unwrap();
+        assert_eq!(i, 1, "artist + 18 tracks beats the same-title albums by other artists");
+        assert!(!confident, "a title match is missing, so a human confirms");
+    }
+
+    #[test]
+    fn compilations_are_not_penalized_for_artist() {
+        let w = want("Various Artists", "Pulp Fiction (Music from the Motion Picture)", 1994, 16);
+        let hits = [hit("Various Artists", "Pulp Fiction (Music from the Motion Picture)", 1994, 16)];
+        assert!(best_match(&hits, &w).unwrap().2);
+    }
+
+    #[test]
+    fn year_breaks_ties_between_same_artist_albums() {
+        let w = want("My Bloody Valentine", "Loveless", 1991, 11);
+        let hits = [hit("my bloody valentine", "m b v", 2013, 9), hit("my bloody valentine", "loveless", 1991, 11)];
+        let (i, _, confident) = best_match(&hits, &w).unwrap();
+        assert!(i == 1 && confident);
+    }
+
+    #[test]
+    fn search_terms_are_trimmed() {
+        let w = want("Nujabes / Fat Jon the Ample Soul Physician", "Samurai Champloo OST Departure", 2004, 14);
+        let s = w.searches();
+        assert_eq!(s[0], ("Nujabes Samurai Champloo Departure".into(), false));
+        assert_eq!(s[1], ("Samurai Champloo Departure".into(), false));
+        assert_eq!(s[2], ("Nujabes".into(), true));
+        assert_eq!(query_words("Clubber's Guide to... 2001 (Disc 2)"), "Clubber's Guide to 2001");
+        assert_eq!(primary_artist("Dean Blunt & Elias Rønnenfelt"), "Dean Blunt");
+        let various = want("Various Artists", "Now 42", 0, 20).searches();
+        assert!(various.iter().all(|(_, by_artist)| !by_artist));
     }
 
     #[test]
@@ -295,21 +522,18 @@ mod tests {
         assert_eq!(default_country(), "hu");
     }
 
-    /// Hits the real API: `cargo test -- --ignored itunes_live`
+    /// Hits the real API: `cargo test -- --ignored itunes_live --nocapture`
     #[test]
     #[ignore]
     fn itunes_live() {
-        let hits = search("weezer blue album", "us").unwrap();
-        for h in &hits {
-            println!("  {:.3}  {} — {} ({}, {} tracks)", score(h, "Weezer", "Weezer (Blue Album)", 10), h.artist, h.album, h.year, h.tracks);
+        for w in [
+            want("Frankie Chan & Roel A. Garcia", "Fallen Angels (OST)", 0, 19),
+            want("Nujabes / Fat Jon the Ample Soul Physician", "Samurai Champloo OST Departure", 2004, 14),
+            want("My Bloody Valentine", "Loveless", 1991, 11),
+        ] {
+            let hits = find(&w, "hu", |_| false).unwrap();
+            let (i, top, confident) = best_match(&hits, &w).unwrap();
+            println!("{} → {} — {} ({}, {}t) score {top:.2} confident {confident}", w.album, hits[i].artist, hits[i].album, hits[i].year, hits[i].tracks);
         }
-        let (i, top, confident) = best_match(&hits, "Weezer", "Weezer (Blue Album)", 10).unwrap();
-        let best = &hits[i];
-        println!("score {top:.3}, confident: {confident}");
-        println!("best: {} — {} ({}), {}", best.artist, best.album, best.year, best.hires_url());
-        let bytes = fetch_cover(best).unwrap();
-        let img = image::load_from_memory(&bytes).unwrap();
-        println!("cover: {}×{}, {} KB", img.width(), img.height(), bytes.len() / 1024);
-        assert!(img.width() >= 600);
     }
 }

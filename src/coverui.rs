@@ -3,7 +3,7 @@
 
 use crate::covers::{self, Assignment};
 use crate::edit::Report;
-use crate::itunes::{self, AlbumHit};
+use crate::itunes::{self, AlbumHit, Wanted};
 use crate::itunesdb::Track;
 use crate::widgets::Input;
 use image::DynamicImage;
@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{Resize, StatefulImage};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
@@ -41,12 +42,22 @@ enum Source {
 struct Card {
     source: Source,
     score: f32,
-    preview: Preview,
+}
+
+impl Card {
+    /// Previews are keyed by this (iTunes collection id; 0 for local images).
+    fn id(&self) -> u64 {
+        match &self.source {
+            Source::Itunes(h) => h.id,
+            Source::Local(..) => 0,
+        }
+    }
 }
 
 enum Msg {
-    Results(u64, Result<Vec<AlbumHit>, String>),
-    Preview(u64, usize, Option<DynamicImage>),
+    /// Everything found so far; `bool` = this was the last search.
+    Results(u64, Result<Vec<AlbumHit>, String>, bool),
+    Preview(u64, u64, Option<DynamicImage>),
     Applied(Result<(Report, Vec<u8>), String>),
 }
 
@@ -54,13 +65,16 @@ pub struct CoverPicker {
     root: PathBuf,
     title: String,
     tracks: Vec<Track>,
-    artist: String,
-    album: String,
+    wanted: Wanted,
     query: Input,
     editing_query: bool,
     country: String,
     other_country: String,
     cards: Vec<Card>,
+    /// Cover previews by collection id, so re-sorting keeps them.
+    previews: HashMap<u64, Preview>,
+    /// The user moved the selection; stop jumping to the best match.
+    user_moved: bool,
     sel: usize,
     scroll: usize,
     /// Columns in the last drawn grid, for ↑↓ navigation.
@@ -83,9 +97,7 @@ pub struct CoverPicker {
 
 impl CoverPicker {
     pub fn new(root: PathBuf, title: String, tracks: Vec<Track>, picker: Picker, write_files: bool) -> Self {
-        let first = &tracks[0];
-        let artist = if first.album_artist.is_empty() { first.artist.clone() } else { first.album_artist.clone() };
-        let album = first.album.clone();
+        let wanted = Wanted::from_tracks(&tracks);
         let country = itunes::default_country();
         let other_country = if country == "us" { "gb".into() } else { "us".into() };
         let (tx, rx) = channel();
@@ -93,13 +105,14 @@ impl CoverPicker {
             root,
             title,
             tracks,
-            query: Input::new(&format!("{artist} {album}").trim().to_string()),
-            artist,
-            album,
+            query: Input::new(format!("{} {}", wanted.artist, wanted.album).trim()),
+            wanted,
             editing_query: false,
             country,
             other_country,
             cards: Vec::new(),
+            previews: HashMap::new(),
+            user_moved: false,
             sel: 0,
             scroll: 0,
             cols: 1,
@@ -114,11 +127,13 @@ impl CoverPicker {
             rx,
             closed: None,
         };
-        p.search();
+        p.search(true);
         p
     }
 
-    fn search(&mut self) {
+    /// `smart`: run the full search strategy for the album (trimmed terms,
+    /// album alone, artist discography). Otherwise search the typed text.
+    fn search(&mut self, smart: bool) {
         let term = self.query.text();
         if term.trim().is_empty() {
             return;
@@ -127,18 +142,37 @@ impl CoverPicker {
         self.cards.retain(|c| matches!(c.source, Source::Local(..)));
         self.sel = 0;
         self.scroll = 0;
+        self.user_moved = false;
         self.searching = Some(Instant::now());
-        let (tx, generation, country) = (self.tx.clone(), self.generation, self.country.clone());
+        let (tx, generation, country, wanted) = (self.tx.clone(), self.generation, self.country.clone(), self.wanted.clone());
         std::thread::spawn(move || {
-            let res = itunes::search(&term, &country).map_err(|e| format!("{e:#}"));
-            let previews: Vec<String> = res.as_ref().map(|h| h.iter().map(AlbumHit::preview_url).collect()).unwrap_or_default();
-            tx.send(Msg::Results(generation, res)).ok();
-            // Previews download in parallel; results arrive in score order later.
-            use rayon::prelude::*;
-            previews.par_iter().enumerate().for_each(|(i, url)| {
-                let img = itunes::download(url).ok().and_then(|b| image::load_from_memory(&b).ok());
-                tx.send(Msg::Preview(generation, i, img.map(|i| i.thumbnail(300, 300)))).ok();
-            });
+            let mut requested: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut fetch_previews = |hits: &[AlbumHit]| {
+                let new: Vec<(u64, String)> =
+                    hits.iter().filter(|h| requested.insert(h.id)).map(|h| (h.id, h.preview_url())).collect();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    use rayon::prelude::*;
+                    new.par_iter().for_each(|(id, url)| {
+                        let img = itunes::download(url).ok().and_then(|b| image::load_from_memory(&b).ok());
+                        tx.send(Msg::Preview(generation, *id, img.map(|i| i.thumbnail(300, 300)))).ok();
+                    });
+                });
+            };
+            if smart {
+                let res = itunes::find(&wanted, &country, |all| {
+                    tx.send(Msg::Results(generation, Ok(all.to_vec()), false)).ok();
+                    fetch_previews(all);
+                    false
+                });
+                tx.send(Msg::Results(generation, res.map_err(|e| format!("{e:#}")), true)).ok();
+            } else {
+                let res = itunes::search(&term, &country).map_err(|e| format!("{e:#}"));
+                if let Ok(hits) = &res {
+                    fetch_previews(hits);
+                }
+                tx.send(Msg::Results(generation, res, true)).ok();
+            }
         });
     }
 
@@ -154,7 +188,9 @@ impl CoverPicker {
                     let preview = image::load_from_memory(&bytes)
                         .map(|img| Preview::Ready(self.picker.new_resize_protocol(img.thumbnail(300, 300))))
                         .unwrap_or(Preview::Failed);
-                    self.cards.insert(0, Card { source: Source::Local(path, bytes), score: 1.0, preview });
+                    self.previews.insert(0, preview);
+                    self.cards.retain(|c| !matches!(c.source, Source::Local(..)));
+                    self.cards.insert(0, Card { source: Source::Local(path, bytes), score: 1.0 });
                     self.sel = 0;
                     self.scroll = 0;
                 }
@@ -169,35 +205,26 @@ impl CoverPicker {
         while let Ok(msg) = self.rx.try_recv() {
             changed = true;
             match msg {
-                Msg::Results(g, _) | Msg::Preview(g, _, _) if g != self.generation => {}
-                Msg::Results(_, Err(e)) => {
+                Msg::Results(g, _, _) | Msg::Preview(g, _, _) if g != self.generation => {}
+                Msg::Results(_, Err(e), _) => {
                     self.searching = None;
                     self.message = Some(format!("Search failed: {e}"));
                 }
-                Msg::Results(_, Ok(hits)) => {
-                    self.searching = None;
-                    if hits.is_empty() {
-                        self.message = Some("No results. Try fewer words, or another store with tab.".into());
+                Msg::Results(_, Ok(hits), last) => {
+                    if last {
+                        self.searching = None;
+                        if hits.is_empty() {
+                            self.message = Some("No results. Try fewer words, another store (tab), or drop an image file.".into());
+                        }
                     }
-                    let n = self.tracks.len();
-                    self.cards.extend(hits.into_iter().map(|h| {
-                        let score = itunes::score(&h, &self.artist, &self.album, n);
-                        Card { source: Source::Itunes(h), score, preview: Preview::Loading }
-                    }));
-                    if let Some((i, _)) = self.cards.iter().enumerate().max_by(|a, b| a.1.score.total_cmp(&b.1.score)) {
-                        self.sel = i;
-                    }
+                    self.set_results(hits);
                 }
-                Msg::Preview(_, i, img) => {
-                    // Previews are indexed in search-result order, which is
-                    // the order the iTunes cards were appended in.
-                    let offset = self.cards.iter().take_while(|c| matches!(c.source, Source::Local(..))).count();
-                    if let Some(card) = self.cards.get_mut(offset + i) {
-                        card.preview = match img {
-                            Some(img) => Preview::Ready(self.picker.new_resize_protocol(img)),
-                            None => Preview::Failed,
-                        };
-                    }
+                Msg::Preview(_, id, img) => {
+                    let p = match img {
+                        Some(img) => Preview::Ready(self.picker.new_resize_protocol(img)),
+                        None => Preview::Failed,
+                    };
+                    self.previews.insert(id, p);
                 }
                 Msg::Applied(Ok(done)) => {
                     self.applying = None;
@@ -210,6 +237,23 @@ impl CoverPicker {
             }
         }
         changed
+    }
+
+    /// Replace the iTunes cards with `hits`, best match first.
+    fn set_results(&mut self, hits: Vec<AlbumHit>) {
+        let selected = self.cards.get(self.sel).map(Card::id);
+        self.cards.retain(|c| matches!(c.source, Source::Local(..)));
+        let mut cards: Vec<Card> =
+            hits.into_iter().map(|h| Card { score: itunes::score(&h, &self.wanted), source: Source::Itunes(h) }).collect();
+        cards.sort_by(|a, b| b.score.total_cmp(&a.score));
+        let locals = self.cards.len();
+        self.cards.extend(cards);
+        self.sel = if self.user_moved {
+            selected.and_then(|id| self.cards.iter().position(|c| c.id() == id)).unwrap_or(0)
+        } else {
+            // Best match: the first iTunes card (local images go first).
+            locals.min(self.cards.len().saturating_sub(1))
+        };
     }
 
     fn apply(&mut self) {
@@ -246,7 +290,7 @@ impl CoverPicker {
             match key.code {
                 KeyCode::Enter => {
                     self.editing_query = false;
-                    self.search();
+                    self.search(false);
                 }
                 KeyCode::Esc => self.editing_query = false,
                 _ => {
@@ -262,13 +306,25 @@ impl CoverPicker {
             KeyCode::Char('/') | KeyCode::Char('s') => self.editing_query = true,
             KeyCode::Tab => {
                 std::mem::swap(&mut self.country, &mut self.other_country);
-                self.search();
+                self.search(true);
             }
             KeyCode::Enter if n > 0 => self.apply(),
-            KeyCode::Right | KeyCode::Char('l') if n > 0 => self.sel = (self.sel + 1).min(n - 1),
-            KeyCode::Left | KeyCode::Char('h') => self.sel = self.sel.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') if n > 0 => self.sel = (self.sel + cols).min(n - 1),
-            KeyCode::Up | KeyCode::Char('k') => self.sel = self.sel.saturating_sub(cols),
+            KeyCode::Right | KeyCode::Char('l') if n > 0 => {
+                self.sel = (self.sel + 1).min(n - 1);
+                self.user_moved = true;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.sel = self.sel.saturating_sub(1);
+                self.user_moved = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                self.sel = (self.sel + cols).min(n - 1);
+                self.user_moved = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.sel = self.sel.saturating_sub(cols);
+                self.user_moved = true;
+            }
             KeyCode::Char('b') => {
                 // Jump to the best-scoring result.
                 if let Some((i, _)) = self.cards.iter().enumerate().max_by(|a, b| a.1.score.total_cmp(&b.1.score)) {
@@ -355,7 +411,8 @@ impl CoverPicker {
 
     fn draw_card(&mut self, f: &mut Frame, rect: Rect, i: usize, is_best: bool) {
         let selected = i == self.sel;
-        let card = &mut self.cards[i];
+        let card = &self.cards[i];
+        let unlikely = card.score < 0.35 && matches!(card.source, Source::Itunes(_));
         let border = if selected { Style::new().fg(ACCENT).bold() } else { Style::new().fg(Color::Rgb(60, 60, 70)) };
         let mut block = Block::bordered().border_type(BorderType::Rounded).border_style(border);
         if is_best {
@@ -364,11 +421,6 @@ impl CoverPicker {
         let inner = block.inner(rect);
         f.render_widget(block, rect);
         let [img, text] = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(inner);
-        match &mut card.preview {
-            Preview::Ready(p) => f.render_stateful_widget(StatefulImage::default().resize(Resize::Fit(None)), img, p),
-            Preview::Loading => f.render_widget(Paragraph::new("\n\n\n   loading…").fg(DIM), img),
-            Preview::Failed => f.render_widget(Paragraph::new("\n\n\n   no preview").fg(DIM), img),
-        }
         let (title, sub) = match &card.source {
             Source::Itunes(h) => (
                 h.album.clone(),
@@ -379,7 +431,14 @@ impl CoverPicker {
                 p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             ),
         };
-        let style = if selected { Style::new().fg(Color::White).bold() } else { Style::new().fg(Color::Gray) };
+        match self.previews.get_mut(&card.id()).unwrap_or(&mut Preview::Loading) {
+            Preview::Ready(p) => f.render_stateful_widget(StatefulImage::default().resize(Resize::Fit(None)), img, p),
+            Preview::Loading => f.render_widget(Paragraph::new("\n\n\n   loading…").fg(DIM), img),
+            Preview::Failed => f.render_widget(Paragraph::new("\n\n\n   no preview").fg(DIM), img),
+        }
+        let style = if unlikely {
+            Style::new().fg(DIM)
+        } else if selected { Style::new().fg(Color::White).bold() } else { Style::new().fg(Color::Gray) };
         f.render_widget(
             Paragraph::new(vec![Line::from(title).style(style), Line::from(sub).fg(DIM)]),
             text,
@@ -400,12 +459,12 @@ mod tests {
     #[test]
     #[ignore]
     fn picker_live() {
-        let t = Track { title: "Butter".into(), artist: "A Tribe Called Quest".into(), album: "The Low End Theory".into(), ..Default::default() };
-        let mut p = CoverPicker::new("/nonexistent".into(), "The Low End Theory".into(), vec![t; 14], Picker::halfblocks(), false);
+        let t = Track { title: "x".into(), artist: "Frankie Chan & Roel A. Garcia".into(), album: "Fallen Angels (OST)".into(), ..Default::default() };
+        let mut p = CoverPicker::new("/nonexistent".into(), "Fallen Angels (OST)".into(), vec![t; 19], Picker::halfblocks(), false);
         let start = Instant::now();
-        while start.elapsed().as_secs() < 20 {
+        while start.elapsed().as_secs() < 40 {
             p.tick();
-            if p.searching.is_none() && p.cards.iter().all(|c| !matches!(c.preview, Preview::Loading)) {
+            if p.searching.is_none() && p.cards.iter().all(|c| p.previews.contains_key(&c.id())) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));

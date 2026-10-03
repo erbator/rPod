@@ -215,14 +215,16 @@ impl ImportView {
         if self.cover_rx.is_some() {
             return;
         }
-        let mut albums: Vec<((String, String), String, String, usize)> = Vec::new();
+        let mut groups: Vec<((String, String), Vec<Track>)> = Vec::new();
         for it in self.items.iter().filter(|it| !it.will_have_art(&self.settings)) {
             let key = it.album_key();
-            match albums.iter_mut().find(|a| a.0 == key) {
-                Some(a) => a.3 += 1,
-                None => albums.push((key, it.meta.sort_artist().to_string(), it.meta.album.clone(), 1)),
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.1.push(it.meta.clone()),
+                None => groups.push((key, vec![it.meta.clone()])),
             }
         }
+        let albums: Vec<((String, String), crate::itunes::Wanted)> =
+            groups.into_iter().map(|(k, tracks)| (k, crate::itunes::Wanted::from_tracks(&tracks))).collect();
         if albums.is_empty() {
             self.message = Some("Every queued song already has a cover.".into());
             return;
@@ -232,13 +234,12 @@ impl ImportView {
         let total = albums.len();
         std::thread::spawn(move || {
             let mut found = 0;
-            for (i, (key, artist, album, n)) in albums.into_iter().enumerate() {
-                let hit = crate::itunes::search(&format!("{artist} {album}"), &country)
-                    .ok()
-                    .and_then(|hits| {
-                        let (best, _, confident) = crate::itunes::best_match(&hits, &artist, &album, n)?;
-                        confident.then(|| hits[best].clone())
-                    });
+            for (i, (key, wanted)) in albums.into_iter().enumerate() {
+                let confident = |all: &[crate::itunes::AlbumHit]| crate::itunes::best_match(all, &wanted).is_some_and(|m| m.2);
+                let hit = crate::itunes::find(&wanted, &country, confident).ok().and_then(|hits| {
+                    let (best, _, confident) = crate::itunes::best_match(&hits, &wanted)?;
+                    confident.then(|| hits[best].clone())
+                });
                 if let Some(bytes) = hit.and_then(|h| crate::itunes::fetch_cover(&h).ok()) {
                     found += 1;
                     if tx.send(CoverMsg::Found(key, bytes)).is_err() {

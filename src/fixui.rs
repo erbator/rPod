@@ -95,16 +95,17 @@ impl FixView {
     pub fn new(root: PathBuf, rows: Vec<AlbumRow>, picker: Picker, write_files: bool) -> Self {
         let (tx, rx) = channel();
         let country = itunes::default_country();
-        let jobs: Vec<(String, String, usize)> = rows.iter().map(|r| (r.artist.clone(), r.title.clone(), r.tracks.len())).collect();
+        let jobs: Vec<itunes::Wanted> = rows.iter().map(|r| itunes::Wanted::from_tracks(&r.tracks)).collect();
         let worker = tx.clone();
         // One worker: searches are paced to Apple's rate limit anyway.
         std::thread::spawn(move || {
-            for (i, (artist, album, n)) in jobs.into_iter().enumerate() {
+            for (i, wanted) in jobs.into_iter().enumerate() {
                 if worker.send(Msg::Searching(i)).is_err() {
                     return; // screen closed
                 }
-                let res = itunes::search(&format!("{artist} {album}"), &country).map(|hits| {
-                    itunes::best_match(&hits, &artist, &album, n).map(|(b, score, confident)| (hits[b].clone(), score, confident))
+                // Stop after the first search that gives a confident match.
+                let res = itunes::find(&wanted, &country, |all| itunes::best_match(all, &wanted).is_some_and(|m| m.2)).map(|hits| {
+                    itunes::best_match(&hits, &wanted).map(|(b, score, confident)| (hits[b].clone(), score, confident))
                 });
                 let preview = res.as_ref().ok().and_then(|m| m.as_ref()).map(|(h, _, _)| h.preview_url());
                 worker.send(Msg::Found(i, res.map_err(|e| format!("{e:#}")))).ok();

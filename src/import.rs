@@ -267,6 +267,17 @@ pub fn scan(files: &[PathBuf], on_ipod: &HashSet<(String, String, String)>) -> V
     items
 }
 
+/// All values of a possibly multi-valued tag field, joined with ", ".
+fn joined(tag: &lofty::tag::Tag, key: ItemKey) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for v in tag.get_strings(key.clone()).map(str::trim) {
+        if !v.is_empty() && !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out.join(", ")
+}
+
 pub fn dup_key(t: &Track) -> (String, String, String) {
     (t.artist.trim().to_lowercase(), t.album.trim().to_lowercase(), t.title.trim().to_lowercase())
 }
@@ -327,12 +338,14 @@ fn probe(path: &Path, on_ipod: &HashSet<(String, String, String)>, dir_has_cover
     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
         let s = |v: Option<std::borrow::Cow<str>>| v.map(|c| c.trim().to_string()).unwrap_or_default();
         meta.title = s(tag.title());
-        meta.artist = s(tag.artist());
         meta.album = s(tag.album());
-        meta.genre = s(tag.genre());
         meta.comment = s(tag.comment());
-        meta.album_artist = tag.get_string(ItemKey::AlbumArtist).unwrap_or("").trim().to_string();
-        meta.composer = tag.get_string(ItemKey::Composer).unwrap_or("").trim().to_string();
+        // These can hold several values (one ARTIST entry per artist in
+        // FLAC/Ogg, null-separated in ID3v2.4): keep all of them.
+        meta.artist = joined(tag, ItemKey::TrackArtist);
+        meta.album_artist = joined(tag, ItemKey::AlbumArtist);
+        meta.composer = joined(tag, ItemKey::Composer);
+        meta.genre = joined(tag, ItemKey::Genre);
         meta.compilation = matches!(tag.get_string(ItemKey::FlagCompilation), Some("1" | "true"));
         meta.track_no = tag.track().unwrap_or(0);
         meta.track_total = tag.track_total().unwrap_or(0);
@@ -825,5 +838,33 @@ mod tests {
         let px = ipod.art.load(ipod.art.best_thumb(t.dbid).unwrap()).unwrap().to_rgb8();
         assert!(px.get_pixel(50, 50)[0] > 240 && px.get_pixel(50, 50)[1] < 10, "picked cover used");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn multi_value_artists_are_all_kept() {
+        use lofty::config::WriteOptions;
+        let dir = std::env::temp_dir().join(format!("rpod-multi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("m.flac");
+        let ok = Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "flac"])
+            .arg(&f)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        let mut tagged = lofty::read_from_path(&f).unwrap();
+        let tt = tagged.primary_tag_type();
+        if tagged.tag(tt).is_none() {
+            tagged.insert_tag(lofty::tag::Tag::new(tt));
+        }
+        let tag = tagged.tag_mut(tt).unwrap();
+        tag.push(lofty::tag::TagItem::new(ItemKey::TrackArtist, lofty::tag::ItemValue::Text("Nujabes".into())));
+        tag.push(lofty::tag::TagItem::new(ItemKey::TrackArtist, lofty::tag::ItemValue::Text("Fat Jon".into())));
+        tag.save_to_path(&f, WriteOptions::default()).unwrap();
+        let items = scan(&[f], &HashSet::new());
+        assert_eq!(items[0].meta.artist, "Nujabes, Fat Jon");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
