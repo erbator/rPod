@@ -60,6 +60,7 @@ shows real album art inside your terminal, and converts and syncs music with a s
 - **Real album art** rendered in the terminal (Kitty, WezTerm, Ghostty, Sixel, with a half-block fallback everywhere else)
 - Live **`/` filter** on any column
 - Track details: format, bitrate, sample rate, size, plays, skips, rating
+- **Edit metadata** in a pop-up, for one track or a whole album at once
 
 </td>
 <td width="50%" valign="top">
@@ -154,6 +155,8 @@ rpod "/run/media/$USER/IPOD" # or point at it explicitly
 | <kbd>1</kbd>–<kbd>4</kbd> / <kbd>Tab</kbd> | Artists · Albums · Songs · Playlists |
 | <kbd>g</kbd> <kbd>G</kbd> / <kbd>PgUp</kbd> <kbd>PgDn</kbd> | jump |
 | <kbd>/</kbd> | filter the current column |
+| <kbd>i</kbd> | **edit metadata** of the selected track, album, artist or playlist |
+| <kbd>space</kbd> | mark tracks to edit together |
 | <kbd>a</kbd> | **add music** |
 | <kbd>e</kbd> | eject the iPod safely |
 | <kbd>q</kbd> | quit |
@@ -234,6 +237,18 @@ Before every write, rPod copies `iTunesDB` and `ArtworkDB` to:
 ```
 
 To undo an import, copy those two files back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
+
+<br>
+
+## ✏️ Editing metadata
+
+Press <kbd>i</kbd> on a track, an album, an artist or a playlist, or mark tracks with <kbd>space</kbd> first, and an editor pops up over the library.
+
+- Title, artist, album, album artist, genre, year, track and disc numbers, composer, comment, compilation and ★ rating
+- Fields that differ between tracks show as `‹mixed›`. Leave them alone and every track keeps its own value
+- Changed fields are marked <code>●</code> before you save
+- <kbd>n</kbd> numbers the tracks 1…n, <kbd>t</kbd> fills in the totals, <kbd>x</kbd> tidies stray spaces
+- <kbd>Ctrl</kbd>+<kbd>S</kbd> saves to the iPod's database (with a backup and a verification pass) and, unless you turn it off with <kbd>f</kbd>, into the audio files' own tags too
 
 <br>
 

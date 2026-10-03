@@ -1,0 +1,112 @@
+//! Writing edits into the audio files' own tags, so files copied off the iPod
+//! later carry the same metadata the iPod shows.
+
+use crate::dbwrite::TrackEdit;
+use anyhow::{Context, Result};
+use lofty::config::WriteOptions;
+use lofty::prelude::*;
+use lofty::tag::{Tag, items::Timestamp};
+use std::path::Path;
+
+pub fn write(path: &Path, e: &TrackEdit) -> Result<()> {
+    let mut file = lofty::read_from_path(path).with_context(|| format!("reading {}", path.display()))?;
+    let tag_type = file.primary_tag_type();
+    if file.tag(tag_type).is_none() {
+        file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = file.tag_mut(tag_type).expect("tag inserted above");
+
+    macro_rules! text {
+        ($field:ident, $set:ident, $remove:ident) => {
+            if let Some(v) = &e.$field {
+                if v.is_empty() { tag.$remove() } else { tag.$set(v.clone()) }
+            }
+        };
+    }
+    text!(title, set_title, remove_title);
+    text!(artist, set_artist, remove_artist);
+    text!(album, set_album, remove_album);
+    text!(genre, set_genre, remove_genre);
+    text!(comment, set_comment, remove_comment);
+
+    for (value, key) in [(&e.album_artist, ItemKey::AlbumArtist), (&e.composer, ItemKey::Composer)] {
+        if let Some(v) = value {
+            if v.is_empty() {
+                tag.remove_key(key);
+            } else {
+                tag.insert_text(key, v.clone());
+            }
+        }
+    }
+
+    macro_rules! number {
+        ($field:ident, $set:ident, $remove:ident) => {
+            if let Some(v) = e.$field {
+                if v == 0 { tag.$remove() } else { tag.$set(v) }
+            }
+        };
+    }
+    number!(track_no, set_track, remove_track);
+    number!(track_total, set_track_total, remove_track_total);
+    number!(disc_no, set_disk, remove_disk);
+    number!(disc_total, set_disk_total, remove_disk_total);
+
+    if let Some(year) = e.year {
+        if year == 0 {
+            tag.remove_date();
+        } else {
+            tag.set_date(Timestamp { year: year as u16, ..Default::default() });
+        }
+    }
+    if let Some(c) = e.compilation {
+        if c {
+            tag.insert_text(ItemKey::FlagCompilation, "1".into());
+        } else {
+            tag.remove_key(ItemKey::FlagCompilation);
+        }
+    }
+
+    tag.save_to_path(path, WriteOptions::default())
+        .with_context(|| format!("writing tags to {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs ffmpeg to make sample files; skipped without it.
+    #[test]
+    fn writes_mp3_and_m4a() {
+        let dir = std::env::temp_dir().join(format!("rpod-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, codec) in [("a.mp3", "libmp3lame"), ("b.m4a", "aac"), ("c.m4a", "alac")] {
+            let path = dir.join(name);
+            let ok = std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-c:a", codec, "-metadata", "title=Old"])
+                .arg(&path)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return;
+            }
+            let e = TrackEdit {
+                title: Some("Új cím".into()),
+                album_artist: Some("The Band".into()),
+                year: Some(1994),
+                track_no: Some(3),
+                track_total: Some(10),
+                comment: Some(String::new()),
+                ..Default::default()
+            };
+            write(&path, &e).unwrap();
+            let f = lofty::read_from_path(&path).unwrap();
+            let t = f.primary_tag().unwrap();
+            assert_eq!(t.title().as_deref(), Some("Új cím"), "{name}");
+            assert_eq!(t.get_string(ItemKey::AlbumArtist), Some("The Band"), "{name}");
+            assert_eq!(t.date().map(|d| d.year), Some(1994), "{name}");
+            assert_eq!((t.track(), t.track_total()), (Some(3), Some(10)), "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

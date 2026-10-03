@@ -1,6 +1,7 @@
 //! TUI state: tabs of drill-down columns, filtering, and cover art caching.
 
 use crate::device::Ipod;
+use crate::editui::EditView;
 use crate::import;
 use crate::importui::ImportView;
 use crate::library::Index;
@@ -8,6 +9,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Recently shown covers kept ready, so revisiting an album sends nothing.
@@ -94,6 +96,9 @@ pub struct App {
     art_cache: Vec<(usize, Option<StatefulProtocol>)>,
     pub art_pending: Option<(usize, Instant)>,
     pub import: Option<ImportView>,
+    pub edit: Option<EditView>,
+    /// Tracks marked with space for batch editing.
+    pub marked: HashSet<usize>,
     pub status: Option<String>,
 }
 
@@ -113,6 +118,8 @@ impl App {
             art_cache: Vec::new(),
             art_pending: None,
             import: None,
+            edit: None,
+            marked: HashSet::new(),
             status: None,
         };
         app.set_tab(Tab::Artists);
@@ -120,6 +127,7 @@ impl App {
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
+        self.marked.clear();
         self.tab = tab;
         self.focus = 0;
         let root = match tab {
@@ -257,12 +265,77 @@ impl App {
 
     /// Dropped files (Kitty pastes their paths) open the Add music screen.
     pub fn on_paste(&mut self, text: &str) {
-        self.open_import().on_paste(text);
+        match &mut self.edit {
+            Some(view) => view.on_paste(text),
+            None => self.open_import().on_paste(text),
+        }
+    }
+
+    /// The tracks `i` edits: the marked ones, else everything under the
+    /// focused row. Returns them with a title for the editor.
+    fn edit_targets(&self) -> Option<(String, Vec<usize>)> {
+        if !self.marked.is_empty() {
+            let mut tracks: Vec<usize> = self.marked.iter().copied().collect();
+            let order: std::collections::HashMap<usize, usize> =
+                self.index.songs.iter().enumerate().map(|(pos, &t)| (t, pos)).collect();
+            tracks.sort_by_key(|t| order.get(t).copied().unwrap_or(usize::MAX));
+            return Some(("marked tracks".into(), tracks));
+        }
+        let ix = &self.index;
+        Some(match self.cols.get(self.focus)?.selected()? {
+            Item::Track(t) => (self.ipod.db.tracks[t].title.clone(), vec![t]),
+            Item::Album(a) => (format!("{} · {}", ix.albums[a].title, ix.albums[a].artist), ix.albums[a].tracks.clone()),
+            Item::Artist(a) => (
+                ix.artists[a].name.clone(),
+                ix.artists[a].albums.iter().flat_map(|&al| ix.albums[al].tracks.iter().copied()).collect(),
+            ),
+            Item::Playlist(p) => {
+                let pl = &self.ipod.db.playlists[p];
+                (pl.name.clone(), pl.items.iter().filter_map(|id| ix.by_id.get(id).copied()).collect())
+            }
+        })
+    }
+
+    fn open_editor(&mut self) {
+        let Some((title, tracks)) = self.edit_targets() else { return };
+        if tracks.is_empty() {
+            return;
+        }
+        let cover = tracks
+            .iter()
+            .find_map(|&t| self.ipod.art.best_thumb(self.ipod.db.tracks[t].dbid))
+            .and_then(|th| self.ipod.art.load(th).ok())
+            .map(|img| self.picker.new_resize_protocol(img));
+        let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();
+        let write_files = import::Settings::load().write_tags;
+        self.edit = Some(EditView::new(self.ipod.root.clone(), title, tracks, cover, write_files));
     }
 
     /// Poll background work. Returns true if a redraw is needed.
     pub fn tick(&mut self) -> bool {
         let art = self.load_pending_art();
+        if let Some(view) = &mut self.edit {
+            let animating = view.tick();
+            if let Some(result) = view.closed.take() {
+                let write_files = view.write_files;
+                self.edit = None;
+                let mut settings = import::Settings::load();
+                if settings.write_tags != write_files {
+                    settings.write_tags = write_files;
+                    settings.save();
+                }
+                if let Some(report) = result {
+                    self.marked.clear();
+                    self.reload();
+                    self.status = Some(match report.file_errors.len() {
+                        0 => format!("Saved {} track(s).", report.tracks),
+                        n => format!("Saved {} track(s); {n} file tag write(s) failed: {}", report.tracks, report.file_errors[0]),
+                    });
+                }
+                return true;
+            }
+            return animating || art;
+        }
         let Some(view) = &mut self.import else { return art };
         let changed = view.tick() || art;
         if let Some(library_changed) = view.closed {
@@ -275,6 +348,7 @@ impl App {
         changed
     }
 
+    /// Re-read the iPod, keeping the view, focus and selections where they were.
     fn reload(&mut self) {
         match Ipod::open(&self.ipod.root) {
             Ok(ipod) => {
@@ -283,7 +357,20 @@ impl App {
                 self.ipod = ipod;
                 self.art = None;
                 self.art_cache.clear();
+                let selections: Vec<(Option<usize>, usize)> =
+                    self.cols.iter().map(|c| (c.state.selected(), c.state.offset())).collect();
+                let focus = self.focus;
                 self.set_tab(self.tab);
+                for (i, (sel, offset)) in selections.into_iter().enumerate() {
+                    let Some(col) = self.cols.get_mut(i) else { break };
+                    if let Some(sel) = sel.filter(|_| !col.items.is_empty()) {
+                        col.state.select(Some(sel.min(col.items.len() - 1)));
+                        *col.state.offset_mut() = offset;
+                        self.rebuild_from(i);
+                    }
+                }
+                self.focus = focus.min(self.cols.len().saturating_sub(1));
+                self.refresh_art();
             }
             Err(e) => self.status = Some(format!("Couldn't reload the iPod: {e:#}")),
         }
@@ -291,6 +378,11 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.status = None;
+        if let Some(view) = &mut self.edit {
+            view.on_key(key);
+            self.tick();
+            return;
+        }
         if let Some(view) = &mut self.import {
             view.on_key(key);
             self.tick();
@@ -340,6 +432,15 @@ impl App {
             }
             KeyCode::Char('a') => {
                 self.open_import();
+            }
+            KeyCode::Char('i') => self.open_editor(),
+            KeyCode::Char(' ') => {
+                if let Some(Item::Track(t)) = self.cols[self.focus].selected() {
+                    if !self.marked.remove(&t) {
+                        self.marked.insert(t);
+                    }
+                    self.move_by(1);
+                }
             }
             KeyCode::Char('e') => {
                 self.status = Some(match crate::device::eject(&self.ipod.root) {

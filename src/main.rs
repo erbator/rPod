@@ -4,10 +4,14 @@ mod artworkdb;
 mod bytes;
 mod dbwrite;
 mod device;
+mod edit;
+mod editui;
 mod itunesdb;
 mod import;
 mod importui;
 mod library;
+mod store;
+mod tags;
 mod ui;
 
 use anyhow::{Result, bail};
@@ -91,7 +95,7 @@ fn add_cli(args: &[String]) -> Result<()> {
     let t0 = std::time::Instant::now();
     let files = import::expand(&paths.iter().map(PathBuf::from).collect::<Vec<_>>());
     let items = import::scan(&files, &on_ipod);
-    use std::io::Write as _;
+    use std::io::Write;
     let _ = writeln!(std::io::stdout(), "scanned {} files in {:.2?}", items.len(), t0.elapsed());
     let settings = import::Settings::load();
     for it in &items {
@@ -103,7 +107,6 @@ fn add_cli(args: &[String]) -> Result<()> {
     std::thread::spawn(move || import::run(root, items, settings, tx));
     // Keep draining progress even if stdout goes away (e.g. piped into
     // `head`): a panic here would abandon the import half-way.
-    use std::io::Write;
     let mut out = std::io::stdout();
     for p in rx {
         let at = format!("[{:>6.2?}]", t0.elapsed());

@@ -10,7 +10,7 @@
 use crate::bytes::{Chunk, utf16le};
 use crate::itunesdb::{ITunesDb, Track};
 use anyhow::{Result, bail};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A track to add. `id` is assigned by the writer.
 #[derive(Debug, Clone, Default)]
@@ -63,25 +63,28 @@ impl Builder {
         Self { buf: c.buf[c.off..c.off + c.header_len()].to_vec() }
     }
 
-    fn u8(&mut self, off: usize, v: u8) -> &mut Self {
-        self.buf[off] = v;
+    /// Setters skip fields beyond the header, so older, shorter header
+    /// variants are left alone rather than corrupted.
+    fn put(&mut self, off: usize, bytes: &[u8]) -> &mut Self {
+        if let Some(dst) = self.buf.get_mut(off..off + bytes.len()) {
+            dst.copy_from_slice(bytes);
+        }
         self
+    }
+    fn u8(&mut self, off: usize, v: u8) -> &mut Self {
+        self.put(off, &[v])
     }
     fn u16(&mut self, off: usize, v: u16) -> &mut Self {
-        self.buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
-        self
+        self.put(off, &v.to_le_bytes())
     }
     fn u32(&mut self, off: usize, v: u32) -> &mut Self {
-        self.buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
-        self
+        self.put(off, &v.to_le_bytes())
     }
     fn u64(&mut self, off: usize, v: u64) -> &mut Self {
-        self.buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
-        self
+        self.put(off, &v.to_le_bytes())
     }
     fn f32(&mut self, off: usize, v: f32) -> &mut Self {
-        self.buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
-        self
+        self.put(off, &v.to_le_bytes())
     }
 
     /// Append children and set the total length (third header word).
@@ -199,10 +202,28 @@ const SORT_ARTIST: u32 = 5;
 const SORT_GENRE: u32 = 7;
 const SORT_COMPOSER: u32 = 18;
 
-/// Case-insensitive key that files "The Strokes" under S, as iTunes does.
+/// Case-insensitive key that files "The Strokes" under S and "A Tribe
+/// Called Quest" under T, as iTunes does.
 fn sort_key(s: &str) -> String {
     let f = fold(s);
-    f.strip_prefix("the ").map(str::to_string).unwrap_or(f)
+    for article in ["the ", "a ", "an "] {
+        if let Some(rest) = f.strip_prefix(article) {
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    f
+}
+
+/// iTunes' stored "sort as" form: "The Strokes" → "Strokes, The".
+pub fn sort_form(s: &str) -> String {
+    for article in ["the ", "a ", "an "] {
+        if s.len() > article.len() && s.is_char_boundary(article.len()) && s[..article.len()].eq_ignore_ascii_case(article) {
+            return format!("{}, {}", &s[article.len()..], s[..article.len()].trim_end());
+        }
+    }
+    s.to_string()
 }
 
 fn jump_letter(key: &str) -> u16 {
@@ -351,10 +372,214 @@ fn mhii_artist(id: u32, name: &str) -> Vec<u8> {
     h.finish(&string_mhod(300, name))
 }
 
+// ---------------------------------------------------------------- edits
+
+/// Changes to an existing track. `None` leaves a field as it is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackEdit {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub genre: Option<String>,
+    pub composer: Option<String>,
+    pub comment: Option<String>,
+    pub year: Option<u32>,
+    pub track_no: Option<u32>,
+    pub track_total: Option<u32>,
+    pub disc_no: Option<u32>,
+    pub disc_total: Option<u32>,
+    pub compilation: Option<bool>,
+    /// 0–100, 20 per star.
+    pub rating: Option<u8>,
+    /// New cover: (ArtworkDB image id, source image byte size).
+    pub artwork: Option<(u32, u32)>,
+}
+
+impl TrackEdit {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn apply(&self, t: &mut Track) {
+        fn set<T: Clone>(dst: &mut T, v: &Option<T>) {
+            if let Some(v) = v {
+                *dst = v.clone();
+            }
+        }
+        set(&mut t.title, &self.title);
+        set(&mut t.artist, &self.artist);
+        set(&mut t.album, &self.album);
+        set(&mut t.album_artist, &self.album_artist);
+        set(&mut t.genre, &self.genre);
+        set(&mut t.composer, &self.composer);
+        set(&mut t.comment, &self.comment);
+        set(&mut t.year, &self.year);
+        set(&mut t.track_no, &self.track_no);
+        set(&mut t.track_total, &self.track_total);
+        set(&mut t.disc_no, &self.disc_no);
+        set(&mut t.disc_total, &self.disc_total);
+        set(&mut t.compilation, &self.compilation);
+        set(&mut t.rating, &self.rating);
+        if self.artwork.is_some() {
+            t.has_artwork = true;
+        }
+    }
+
+    /// Whether the track may need to move to another album/artist entry.
+    fn relinks(&self) -> bool {
+        self.artist.is_some() || self.album.is_some() || self.album_artist.is_some()
+    }
+
+    /// (string mhod type, its "sort as" mhod type, new value) per edited text field.
+    fn strings(&self) -> Vec<(u32, Option<u32>, &str)> {
+        [
+            (1, Some(27), &self.title),
+            (4, Some(23), &self.artist),
+            (3, Some(28), &self.album),
+            (22, Some(29), &self.album_artist),
+            (12, Some(30), &self.composer),
+            (5, None, &self.genre),
+            (8, None, &self.comment),
+        ]
+        .into_iter()
+        .filter_map(|(ty, sort, v)| v.as_deref().map(|v| (ty, sort, v)))
+        .collect()
+    }
+}
+
+/// Rewrite one existing mhit with `e` applied. Untouched fields and string
+/// records are copied verbatim; an edited field's "sort as" record is
+/// regenerated so the iPod doesn't keep sorting by the old value.
+fn rewrite_mhit(it: Chunk, e: &TrackEdit, links: Option<(u32, u32)>) -> Result<Vec<u8>> {
+    let mut h = Builder::from_header(it);
+    let opt32 = |h: &mut Builder, off: usize, v: Option<u32>| {
+        if let Some(v) = v {
+            h.u32(off, v);
+        }
+    };
+    if let Some(v) = e.compilation {
+        h.u8(0x1E, v as u8);
+    }
+    if let Some(v) = e.rating {
+        h.u8(0x1F, v);
+    }
+    opt32(&mut h, 0x2C, e.track_no);
+    opt32(&mut h, 0x30, e.track_total);
+    opt32(&mut h, 0x34, e.year);
+    opt32(&mut h, 0x5C, e.disc_no);
+    opt32(&mut h, 0x60, e.disc_total);
+    h.u32(0x20, mac_now());
+    if let Some((album, artist)) = links {
+        h.u32(0x120, album).u32(0x1E0, artist);
+    }
+    if let Some((image_id, src_size)) = e.artwork {
+        h.u16(0x7C, 1).u32(0x80, src_size).u8(0xA4, 1).u32(0x160, image_id);
+    }
+
+    let strings = e.strings();
+    let mut kids = Vec::new();
+    let mut count = 0u32;
+    let mut replaced = Vec::new();
+    let mut off = it.off + it.header_len();
+    for _ in 0..it.u32(0x0C) {
+        let od = Chunk::at(it.buf, off)?;
+        od.expect(b"mhod")?;
+        let ty = od.u32(0x0C);
+        if let Some(&(_, _, v)) = strings.iter().find(|(t, _, _)| *t == ty) {
+            replaced.push(ty);
+            if !v.is_empty() {
+                kids.extend(string_mhod(ty, v));
+                count += 1;
+            }
+        } else if let Some(&(_, _, v)) = strings.iter().find(|(_, sort, _)| *sort == Some(ty)) {
+            if !v.is_empty() {
+                kids.extend(string_mhod(ty, &sort_form(v)));
+                count += 1;
+            }
+        } else {
+            kids.extend_from_slice(&it.buf[od.off..od.end()]);
+            count += 1;
+        }
+        off = od.end();
+    }
+    // Fields the track didn't have before.
+    for &(ty, _, v) in &strings {
+        if !replaced.contains(&ty) && !v.is_empty() {
+            kids.extend(string_mhod(ty, v));
+            count += 1;
+        }
+    }
+    h.u32(0x0C, count);
+    Ok(h.finish(&kids))
+}
+
+/// Finds or creates the album (mhia) and artist (mhii) list entries tracks link to.
+struct Linker {
+    albums: HashMap<(String, String), u32>,
+    artists: HashMap<String, u32>,
+    next_album: u32,
+    next_artist: u32,
+    new_albums: Vec<Vec<u8>>,
+    new_artists: Vec<Vec<u8>>,
+}
+
+impl Linker {
+    fn read(mhbd: Chunk) -> Result<Self> {
+        let mut albums = HashMap::new();
+        let mut artists = HashMap::new();
+        for_each_mhsd(mhbd, |sd| {
+            match sd.u32(0x0C) {
+                4 => albums = album_ids(sd.first_child()?)?,
+                8 => artists = artist_ids(sd.first_child()?)?,
+                _ => {}
+            }
+            Ok(())
+        })?;
+        Ok(Self {
+            next_album: albums.values().max().copied().unwrap_or(0) + 1,
+            next_artist: artists.values().max().copied().unwrap_or(0) + 1,
+            albums,
+            artists,
+            new_albums: Vec::new(),
+            new_artists: Vec::new(),
+        })
+    }
+
+    fn link(&mut self, t: &Track) -> (u32, u32) {
+        let album = *self.albums.entry(album_key(t)).or_insert_with(|| {
+            self.new_albums.push(mhia(self.next_album, t));
+            self.next_album += 1;
+            self.next_album - 1
+        });
+        let artist = *self.artists.entry(fold(&t.artist)).or_insert_with(|| {
+            self.new_artists.push(mhii_artist(self.next_artist, &t.artist));
+            self.next_artist += 1;
+            self.next_artist - 1
+        });
+        (album, artist)
+    }
+}
+
 // ---------------------------------------------------------------- top level
 
 /// Produce a new iTunesDB with `new` appended. Assigns `meta.id` on each.
 pub fn add_tracks(orig: &[u8], existing: &ITunesDb, new: &mut [NewTrack]) -> Result<Vec<u8>> {
+    write(orig, existing, new, &HashMap::new())
+}
+
+/// Apply `edits` (keyed by track id) to existing tracks.
+pub fn edit_tracks(orig: &[u8], existing: &ITunesDb, edits: &HashMap<u32, TrackEdit>) -> Result<Vec<u8>> {
+    write(orig, existing, &mut [], edits)
+}
+
+/// The general writer: edit existing tracks and append new ones in one pass.
+pub fn write(
+    orig: &[u8],
+    existing: &ITunesDb,
+    new: &mut [NewTrack],
+    edits: &HashMap<u32, TrackEdit>,
+) -> Result<Vec<u8>> {
     let mhbd = Chunk::at(orig, 0)?;
     mhbd.expect(b"mhbd")?;
 
@@ -364,38 +589,58 @@ pub fn add_tracks(orig: &[u8], existing: &ITunesDb, new: &mut [NewTrack]) -> Res
         next_id += 1;
     }
 
-    // Pre-scan the album/artist lists so new tracks can join existing albums.
-    let mut albums: HashMap<(String, String), u32> = HashMap::new();
-    let mut artists: HashMap<String, u32> = HashMap::new();
+    // Each existing track's current (album id, artist id), read from its mhit.
+    let mut current_links: Vec<(u32, u32)> = Vec::with_capacity(existing.tracks.len());
     for_each_mhsd(mhbd, |sd| {
-        match sd.u32(0x0C) {
-            4 => albums = album_ids(sd.first_child()?)?,
-            8 => artists = artist_ids(sd.first_child()?)?,
-            _ => {}
+        if sd.u32(0x0C) == 1 {
+            let mhlt = sd.first_child()?;
+            let mut off = mhlt.off + mhlt.header_len();
+            for _ in 0..mhlt.total_len() {
+                let it = Chunk::at(orig, off)?;
+                current_links.push((it.u32(0x120), it.u32(0x1E0)));
+                off = it.end();
+            }
         }
         Ok(())
     })?;
-    let mut new_albums: Vec<Vec<u8>> = Vec::new();
-    let mut new_artists: Vec<Vec<u8>> = Vec::new();
-    let mut next_album = albums.values().max().copied().unwrap_or(0) + 1;
-    let mut next_artist = artists.values().max().copied().unwrap_or(0) + 1;
-    let mut links = Vec::with_capacity(new.len());
-    for t in new.iter() {
-        let album_id = *albums.entry(album_key(&t.meta)).or_insert_with(|| {
-            new_albums.push(mhia(next_album, &t.meta));
-            next_album += 1;
-            next_album - 1
-        });
-        let artist_id = *artists.entry(fold(&t.meta.artist)).or_insert_with(|| {
-            new_artists.push(mhii_artist(next_artist, &t.meta.artist));
-            next_artist += 1;
-            next_artist - 1
-        });
-        links.push((album_id, artist_id));
+
+    // Tracks as they'll be after editing, for relinking and sort indexes.
+    let mut current: Vec<Track> = existing.tracks.clone();
+    let mut linker = Linker::read(mhbd)?;
+    let mut relinked: HashMap<u32, (u32, u32)> = HashMap::new();
+    for t in current.iter_mut() {
+        if let Some(e) = edits.get(&t.id) {
+            e.apply(t);
+            if e.relinks() {
+                relinked.insert(t.id, linker.link(t));
+            }
+        }
+    }
+    let links: Vec<(u32, u32)> = new.iter().map(|t| linker.link(&t.meta)).collect();
+
+    // Album/artist entries only edited tracks used, and nobody uses now, are dropped.
+    let final_links: Vec<(u32, u32)> = current
+        .iter()
+        .zip(&current_links)
+        .map(|(t, l)| relinked.get(&t.id).copied().unwrap_or(*l))
+        .chain(links.iter().copied())
+        .collect();
+    let used_albums: HashSet<u32> = final_links.iter().map(|l| l.0).collect();
+    let used_artists: HashSet<u32> = final_links.iter().map(|l| l.1).collect();
+    let mut drop_albums = HashSet::new();
+    let mut drop_artists = HashSet::new();
+    for (t, l) in existing.tracks.iter().zip(&current_links) {
+        if relinked.contains_key(&t.id) {
+            if !used_albums.contains(&l.0) {
+                drop_albums.insert(l.0);
+            }
+            if !used_artists.contains(&l.1) {
+                drop_artists.insert(l.1);
+            }
+        }
     }
 
-    // Track list in final order, for the sort indexes.
-    let all: Vec<&Track> = existing.tracks.iter().chain(new.iter().map(|t| &t.meta)).collect();
+    let all: Vec<&Track> = current.iter().chain(new.iter().map(|t| &t.meta)).collect();
 
     let mut sections = Vec::new();
     for_each_mhsd(mhbd, |sd| {
@@ -403,18 +648,28 @@ pub fn add_tracks(orig: &[u8], existing: &ITunesDb, new: &mut [NewTrack]) -> Res
             1 => {
                 let mhlt = sd.first_child()?;
                 mhlt.expect(b"mhlt")?;
-                let mhit_len = Chunk::at(orig, mhlt.off + mhlt.header_len())
-                    .map(|c| c.header_len())
-                    .unwrap_or(0x270);
-                let mut items = orig[mhlt.off + mhlt.header_len()..sd.end()].to_vec();
+                let mut items = Vec::with_capacity(sd.end() - mhlt.off);
+                let mut mhit_len = 0x270;
+                let mut off = mhlt.off + mhlt.header_len();
+                for _ in 0..mhlt.total_len() {
+                    let it = Chunk::at(orig, off)?;
+                    it.expect(b"mhit")?;
+                    mhit_len = it.header_len();
+                    let id = it.u32(0x10);
+                    match edits.get(&id) {
+                        Some(e) => items.extend(rewrite_mhit(it, e, relinked.get(&id).copied())?),
+                        None => items.extend_from_slice(&orig[it.off..it.end()]),
+                    }
+                    off = it.end();
+                }
                 for (t, (album, artist)) in new.iter().zip(&links) {
                     items.extend(mhit(t, t.meta.id, mhit_len, *album, *artist));
                 }
                 Builder::from_header(mhlt).finish_list(mhlt.total_len() + new.len(), &items)
             }
             2 | 3 => rewrite_playlists(sd.first_child()?, new, &all)?,
-            4 => append_list(sd.first_child()?, b"mhla", sd.end(), &new_albums)?,
-            8 => append_list(sd.first_child()?, b"mhli", sd.end(), &new_artists)?,
+            4 => rewrite_list(sd.first_child()?, b"mhla", &linker.new_albums, &drop_albums)?,
+            8 => rewrite_list(sd.first_child()?, b"mhli", &linker.new_artists, &drop_artists)?,
             _ => orig[sd.off + sd.header_len()..sd.end()].to_vec(),
         };
         sections.extend(Builder::from_header(sd).finish(&body));
@@ -436,13 +691,24 @@ fn for_each_mhsd<'a>(mhbd: Chunk<'a>, mut f: impl FnMut(Chunk<'a>) -> Result<()>
     Ok(())
 }
 
-fn append_list(list: Chunk, tag: &[u8; 4], end: usize, extra: &[Vec<u8>]) -> Result<Vec<u8>> {
+/// Copy an album/artist list, dropping entries by id and appending new ones.
+fn rewrite_list(list: Chunk, tag: &[u8; 4], extra: &[Vec<u8>], drop: &HashSet<u32>) -> Result<Vec<u8>> {
     list.expect(tag)?;
-    let mut items = list.buf[list.off + list.header_len()..end].to_vec();
+    let mut items = Vec::new();
+    let mut kept = 0;
+    let mut off = list.off + list.header_len();
+    for _ in 0..list.total_len() {
+        let item = Chunk::at(list.buf, off)?;
+        if !drop.contains(&item.u32(0x10)) {
+            items.extend_from_slice(&list.buf[item.off..item.end()]);
+            kept += 1;
+        }
+        off = item.end();
+    }
     for e in extra {
         items.extend_from_slice(e);
     }
-    Ok(Builder::from_header(list).finish_list(list.total_len() + extra.len(), &items))
+    Ok(Builder::from_header(list).finish_list(kept + extra.len(), &items))
 }
 
 fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track]) -> Result<Vec<u8>> {
@@ -552,5 +818,132 @@ mod tests {
         assert!(re.playlists.iter().filter(|p| p.is_master).all(|p| p.items.contains(&added.id)));
         // Total length in mhbd must equal file length.
         assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize, out.len());
+    }
+
+    /// Raw mhit chunks keyed by track id.
+    fn mhits(buf: &[u8]) -> HashMap<u32, Vec<u8>> {
+        let mut out = HashMap::new();
+        let mhbd = Chunk::at(buf, 0).unwrap();
+        for_each_mhsd(mhbd, |sd| {
+            if sd.u32(0x0C) == 1 {
+                let mhlt = sd.first_child()?;
+                let mut off = mhlt.off + mhlt.header_len();
+                for _ in 0..mhlt.total_len() {
+                    let it = Chunk::at(buf, off)?;
+                    out.insert(it.u32(0x10), buf[it.off..it.end()].to_vec());
+                    off = it.end();
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    fn mhod_value(mhit_bytes: &[u8], ty: u32) -> Option<String> {
+        let it = Chunk::at(mhit_bytes, 0).unwrap();
+        let mut off = it.header_len();
+        for _ in 0..it.u32(0x0C) {
+            let od = Chunk::at(mhit_bytes, off).unwrap();
+            if od.u32(0x0C) == ty {
+                return Some(read_mhod_string(od));
+            }
+            off = od.end();
+        }
+        None
+    }
+
+    fn list_count(buf: &[u8], ty: u32) -> usize {
+        let mut n = 0;
+        for_each_mhsd(Chunk::at(buf, 0).unwrap(), |sd| {
+            if sd.u32(0x0C) == ty {
+                n = sd.first_child()?.total_len();
+            }
+            Ok(())
+        })
+        .unwrap();
+        n
+    }
+
+    #[test]
+    fn edit_text_and_numbers() {
+        let Some(orig) = sample() else { return };
+        let db = itunesdb::parse(&orig).unwrap();
+        let id = db.tracks[0].id;
+        let edit = TrackEdit {
+            title: Some("Új cím – ő".into()),
+            artist: Some("The New Band".into()),
+            year: Some(1999),
+            rating: Some(80),
+            comment: Some(String::new()),
+            ..Default::default()
+        };
+        let out = edit_tracks(&orig, &db, &HashMap::from([(id, edit)])).unwrap();
+        let re = itunesdb::parse(&out).unwrap();
+        let t = re.tracks.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(t.title, "Új cím – ő");
+        assert_eq!(t.artist, "The New Band");
+        assert_eq!((t.year, t.rating), (1999, 80));
+        assert_eq!(t.album, db.tracks[0].album, "untouched fields survive");
+        assert_eq!(t.location, db.tracks[0].location);
+        assert_eq!(mhod_value(&mhits(&out)[&id], 23).as_deref(), Some("New Band, The"));
+
+        let (before, after) = (mhits(&orig), mhits(&out));
+        for (tid, raw) in &before {
+            if *tid != id {
+                assert!(after[tid] == *raw, "track {tid} changed");
+            }
+        }
+        assert_eq!(re.tracks.len(), db.tracks.len());
+        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize, out.len());
+    }
+
+    #[test]
+    fn move_track_into_existing_album() {
+        let Some(orig) = sample() else { return };
+        let db = itunesdb::parse(&orig).unwrap();
+        let (a, b) = (&db.tracks[0], db.tracks.iter().find(|t| t.album != db.tracks[0].album).unwrap());
+        let edit = TrackEdit {
+            album: Some(b.album.clone()),
+            album_artist: Some(b.album_artist.clone()),
+            artist: Some(b.artist.clone()),
+            ..Default::default()
+        };
+        let out = edit_tracks(&orig, &db, &HashMap::from([(a.id, edit)])).unwrap();
+        let m = mhits(&out);
+        let album_of = |id: u32| Chunk::at(&m[&id], 0).unwrap().u32(0x120);
+        assert_eq!(album_of(a.id), album_of(b.id));
+        assert!(list_count(&out, 4) <= list_count(&orig, 4), "no new album entry needed");
+    }
+
+    #[test]
+    fn rename_whole_album_replaces_its_entry() {
+        let Some(orig) = sample() else { return };
+        let db = itunesdb::parse(&orig).unwrap();
+        let m = mhits(&orig);
+        let album_id = |id: u32| Chunk::at(&m[&id], 0).unwrap().u32(0x120);
+        let target = album_id(db.tracks[0].id);
+        let edits: HashMap<u32, TrackEdit> = db
+            .tracks
+            .iter()
+            .filter(|t| album_id(t.id) == target)
+            .map(|t| (t.id, TrackEdit { album: Some("Renamed Album".into()), ..Default::default() }))
+            .collect();
+        let out = edit_tracks(&orig, &db, &edits).unwrap();
+        assert_eq!(list_count(&out, 4), list_count(&orig, 4), "one entry added, the stale one dropped");
+        let m2 = mhits(&out);
+        let new_ids: HashSet<u32> = edits.keys().map(|id| Chunk::at(&m2[id], 0).unwrap().u32(0x120)).collect();
+        assert_eq!(new_ids.len(), 1);
+        assert!(!new_ids.contains(&target));
+        let re = itunesdb::parse(&out).unwrap();
+        assert!(re.tracks.iter().filter(|t| edits.contains_key(&t.id)).all(|t| t.album == "Renamed Album"));
+    }
+
+    #[test]
+    fn sort_forms() {
+        assert_eq!(sort_form("The Strokes"), "Strokes, The");
+        assert_eq!(sort_form("A Tribe Called Quest"), "Tribe Called Quest, A");
+        assert_eq!(sort_form("Theory of a Deadman"), "Theory of a Deadman");
+        assert_eq!(sort_form("Ő"), "Ő");
     }
 }

@@ -4,6 +4,7 @@
 use crate::artwrite::{self, NewImage};
 use crate::dbwrite::{self, NewTrack, rand_u64};
 use crate::itunesdb::{self, Track};
+use crate::store;
 use anyhow::{Context, Result, bail};
 use image::DynamicImage;
 use lofty::config::ParseOptions;
@@ -72,6 +73,8 @@ pub struct Settings {
     pub skip_duplicates: bool,
     /// Use cover.jpg / folder.jpg when a file has no embedded art.
     pub folder_art: bool,
+    /// Also write metadata edits into the audio files' tags.
+    pub write_tags: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +86,7 @@ impl Default for Settings {
             jobs: std::thread::available_parallelism().map_or(4, |n| n.get()),
             skip_duplicates: true,
             folder_art: true,
+            write_tags: true,
         }
     }
 }
@@ -628,31 +632,6 @@ fn prepare(
     Ok(Prepared { track: NewTrack { meta, filetype, vbr, artwork: None }, file: dest, art })
 }
 
-fn backup_dir(root: &Path) -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    let guid = std::fs::read_to_string(root.join("iPod_Control/Device/SysInfo"))
-        .ok()
-        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("FirewireGuid:").map(|g| g.trim().to_string())))
-        .unwrap_or_else(|| "unknown".into());
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    base.join("rpod/backups").join(guid).join(stamp.to_string())
-}
-
-/// Write via a temp file and rename, so an interrupted write never leaves a
-/// half-written database.
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("rpod-tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::File::open(&tmp)?.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 /// Run the whole import on the calling thread, reporting through `tx`.
 pub fn run(root: PathBuf, items: Vec<Item>, settings: Settings, tx: Sender<Progress>) {
     let res = run_inner(&root, &items, &settings, &tx).map_err(|e| format!("{e:#}"));
@@ -716,18 +695,12 @@ fn run_inner(root: &Path, items: &[Item], settings: &Settings, tx: &Sender<Progr
 }
 
 fn commit(root: &Path, ok: &mut [(usize, Prepared)], tx: &Sender<Progress>) -> Result<()> {
-    let ctl = root.join("iPod_Control");
-    let db_path = ctl.join("iTunes/iTunesDB");
-    let art_dir = ctl.join("Artwork");
+    let db_path = store::itunesdb_path(root);
+    let art_dir = store::artwork_dir(root);
     let art_path = art_dir.join("ArtworkDB");
 
     tx.send(Progress::Phase("Backing up databases…".into())).ok();
-    let backup = backup_dir(root);
-    std::fs::create_dir_all(&backup)?;
-    std::fs::copy(&db_path, backup.join("iTunesDB")).context("backing up iTunesDB")?;
-    if art_path.exists() {
-        std::fs::copy(&art_path, backup.join("ArtworkDB")).context("backing up ArtworkDB")?;
-    }
+    store::backup(root)?;
 
     if art_path.exists() {
         tx.send(Progress::Phase("Writing artwork…".into())).ok();
@@ -743,7 +716,7 @@ fn commit(root: &Path, ok: &mut [(usize, Prepared)], tx: &Sender<Progress>) -> R
         if !images.is_empty() {
             let orig = std::fs::read(&art_path)?;
             let (db, ids) = artwrite::add_images(&art_dir, &orig, &images)?;
-            atomic_write(&art_path, &db)?;
+            store::atomic_write(&art_path, &db)?;
             for ((&i, id), im) in with_art.iter().zip(ids).zip(&images) {
                 ok[i].1.track.artwork = Some((id, im.src_size));
             }
@@ -760,7 +733,7 @@ fn commit(root: &Path, ok: &mut [(usize, Prepared)], tx: &Sender<Progress>) -> R
     if check.tracks.len() != parsed.tracks.len() + tracks.len() {
         bail!("verification failed: track count mismatch");
     }
-    atomic_write(&db_path, &out)?;
+    store::atomic_write(&db_path, &out)?;
     Ok(())
 }
 

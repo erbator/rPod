@@ -30,6 +30,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_columns(f, app, cols_area);
     draw_detail(f, app, detail_area);
     draw_footer(f, app, footer);
+    if let Some(view) = &mut app.edit {
+        view.draw(f, f.area());
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -87,6 +90,10 @@ fn draw_columns(f: &mut Frame, app: &mut App, area: Rect) {
         if !col.filter.is_empty() {
             title.push(Span::styled(format!("/{} ", col.filter), Style::new().fg(Color::Yellow)));
         }
+        let marked_here = col.items.iter().filter(|it| matches!(it, Item::Track(t) if app.marked.contains(t))).count();
+        if marked_here > 0 {
+            title.push(Span::styled(format!("● {marked_here} marked "), Style::new().fg(Color::Yellow)));
+        }
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(if focused { Style::new().fg(ACCENT) } else { Style::new().fg(DIM) })
@@ -140,7 +147,8 @@ fn row_for<'a>(app: &'a App, kind: ColKind, item: Item) -> Row<'a> {
         Item::Track(t) => {
             let tr = &app.ipod.db.tracks[t];
             let dur = dim(fmt_duration(tr.length_ms));
-            match kind {
+            let mark = if app.marked.contains(&t) { Style::new().fg(Color::Yellow) } else { Style::new() };
+            let row = match kind {
                 ColKind::AlbumTracks => {
                     let no = if tr.track_no > 0 { tr.track_no.to_string() } else { String::new() };
                     Row::new(vec![dim(no), Cell::from(tr.title.as_str()), dur])
@@ -151,7 +159,8 @@ fn row_for<'a>(app: &'a App, kind: ColKind, item: Item) -> Row<'a> {
                     Cell::from(Line::from(tr.album.as_str()).fg(DIM)),
                     dur,
                 ]),
-            }
+            };
+            row.style(mark)
         }
     }
 }
@@ -277,6 +286,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Line::from(format!(" {msg}")).fg(Color::Yellow)
     } else {
         let keys = [
+            ("i", "edit"),
+            ("space", "mark"),
             ("a", "add music"),
             ("e", "eject"),
             ("↑↓/jk", "move"),
