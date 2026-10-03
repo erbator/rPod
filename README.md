@@ -273,14 +273,14 @@ Searches are paced to Apple's limit (about 20 a minute) and cached for a week in
 | Device | Browse | Covers | Add music |
 |---|:---:|:---:|:---:|
 | **iPod Video 5G / 5.5G** | ✅ tested on a real 5.5G | ✅ | ✅ tested on a copy of a real database |
-| iPod Classic 6G / 6.5G / 7G | 🟡 should work | 🟡 | ⛔ **not yet:** needs the *hash58* signature |
+| iPod Classic 6G / 6.5G / 7G | 🟡 should work | 🟡 | ⛔ **not yet:** needs the *hash58* signature (also blocks editing and covers) |
 | iPod nano 3G – 4G | 🟡 untested | 🟡 | ⛔ needs hash58 |
 | iPod nano 5G – 7G | ❔ | ❔ | ⛔ needs hash72 / hashAB |
 | iPod 1G–4G, mini, nano 1G–2G | 🟡 untested | — | 🟡 untested |
 | iPod touch / shuffle | ❌ | ❌ | ❌ |
 
 > [!WARNING]
-> **Don't use "Add music" on an iPod Classic (6G and later) yet.** Those models refuse a database without a valid signature, and rPod doesn't write one yet. The iPod would show an empty library until the database is restored from the backup.
+> **Don't change anything on an iPod Classic (6G and later) yet**: no adding music, editing or covers. Those models refuse a database without a valid signature, and rPod doesn't write one yet. The iPod would show an empty library until the database is restored from the backup. Browsing is fine.
 
 <br>
 
