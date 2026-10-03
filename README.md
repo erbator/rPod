@@ -109,7 +109,7 @@ shows real album art inside your terminal, and converts and syncs music with a s
 > rPod isn't packaged yet. Build it from source with a recent Rust toolchain.
 
 ```bash
-git clone <this repo> rPod && cd rPod
+git clone https://github.com/erbator/rPod && cd rPod
 cargo build --release
 ./target/release/rpod
 ```
