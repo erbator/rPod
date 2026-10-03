@@ -98,14 +98,32 @@ shows real album art inside your terminal, and converts and syncs music with a s
 
 ## 📦 Install
 
-> [!NOTE]
-> rPod isn't packaged yet. Build it from source with a recent Rust toolchain.
+```bash
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | sh
+```
+
+Installs a static binary for **x86_64** or **ARM64 Linux** to `~/.local/bin`, verified against its SHA-256 checksum. On other machines it builds from source with cargo instead.
+
+<details>
+<summary><b>Options, uninstalling and building from source</b></summary>
+<br>
 
 ```bash
+# Pick a version or install location
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | RPOD_VERSION=v0.1.0 RPOD_INSTALL_DIR="$HOME/bin" sh
+
+# Uninstall (keeps your settings and iPod database backups)
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/uninstall.sh | sh
+
+# Uninstall and delete settings + backups
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/uninstall.sh | sh -s -- --purge
+
+# Build from source
 git clone https://github.com/erbator/rPod && cd rPod
-cargo build --release
-./target/release/rpod
+cargo build --release   # → target/release/rpod
 ```
+
+</details>
 
 **Optional but recommended**
 

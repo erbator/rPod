@@ -21,12 +21,14 @@ const USAGE: &str = "\
 usage: rpod [IPOD_ROOT]          browse an iPod (auto-detected if omitted)
        rpod dump [IPOD_ROOT]     print the iPod's database as text
        rpod cover IPOD_ROOT N OUT.png   export track N's cover
-       rpod add [--root IPOD_ROOT] PATH...   add songs/folders without the TUI";
+       rpod add [--root IPOD_ROOT] PATH...   add songs/folders without the TUI
+       rpod --version";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => println!("{USAGE}"),
+        Some("-V" | "--version") => println!("rpod {}", env!("CARGO_PKG_VERSION")),
         Some("dump") => dump(&Ipod::open(&resolve_root(args.get(1))?)?),
         Some("cover") if args.len() == 4 => {
             let ipod = Ipod::open(&PathBuf::from(&args[1]))?;
