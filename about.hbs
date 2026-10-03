@@ -1,0 +1,24 @@
+# Third-party licenses
+
+The licenses of the open-source Rust crates rPod is built from, whose terms
+require these notices to ship with the binary, plus rPod's own license.
+
+{{#each overview}}
+- {{{name}}} ({{count}})
+{{/each}}
+
+{{#each licenses}}
+---
+
+## {{{name}}}
+
+Used by:
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

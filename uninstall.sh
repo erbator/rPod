@@ -34,6 +34,12 @@ for dir in "${RPOD_INSTALL_DIR:-$HOME/.local/bin}" "$HOME/.cargo/bin" /usr/local
 done
 [ "$removed" = 1 ] || warn "no rpod binary found"
 
+DOC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/doc/rpod"
+if [ -d "$DOC_DIR" ]; then
+    rm -rf "$DOC_DIR"
+    say "Removed $DOC_DIR"
+fi
+
 if [ "$PURGE" = 1 ]; then
     for d in "$CONFIG_DIR" "$DATA_DIR"; do
         if [ -e "$d" ]; then

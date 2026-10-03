@@ -11,6 +11,7 @@ set -eu
 REPO="erbator/rPod"
 BIN_DIR="${RPOD_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${RPOD_VERSION:-latest}"
+DOC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/doc/rpod"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -61,6 +62,13 @@ if [ -n "$TARGET" ]; then
         fi
         tar -xzf "$tmp/$asset" -C "$tmp"
         install -m 755 "$tmp/rpod" "$BIN_DIR/rpod"
+        # License notices travel with the installed binary.
+        for doc in LICENSE.md THIRD_PARTY_LICENSES.md; do
+            if [ -f "$tmp/$doc" ]; then
+                mkdir -p "$DOC_DIR"
+                install -m 644 "$tmp/$doc" "$DOC_DIR/$doc"
+            fi
+        done
         installed=1
     else
         warn "no prebuilt binary for $TARGET; falling back to building from source"

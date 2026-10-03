@@ -25,19 +25,27 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Collect third-party licenses
+        run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES.md
+
       - name: Package
-        working-directory: target/${{ matrix.target }}/release
         run: |
-          tar -czf rpod-${{ matrix.target }}.tar.gz rpod
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/rpod LICENSE.md THIRD_PARTY_LICENSES.md dist/
+          tar -czf rpod-${{ matrix.target }}.tar.gz -C dist rpod LICENSE.md THIRD_PARTY_LICENSES.md
           sha256sum rpod-${{ matrix.target }}.tar.gz > rpod-${{ matrix.target }}.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: rpod-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/rpod-${{ matrix.target }}.tar.gz*
+          path: rpod-${{ matrix.target }}.tar.gz*
 
   release:
     needs: build
