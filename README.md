@@ -1,7 +1,7 @@
 <div align="center">
 
 <img src="assets/logo.svg" alt="rPod" width="420">
-<img src="showcase.gif" alt="rPod" width="800" align="center">
+<img src="showcase.gif" alt="rPod" width="1000" align="center">
 ### Your iPod, managed from the terminal. Fast.
 
 **rPod** is a terminal iPod manager written in Rust. It reads and writes the iPod's own databases,<br>
