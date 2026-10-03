@@ -1,0 +1,409 @@
+//! TUI state: tabs of drill-down columns, filtering, and cover art caching.
+
+use crate::device::Ipod;
+use crate::import;
+use crate::importui::ImportView;
+use crate::library::Index;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::widgets::TableState;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+use std::time::{Duration, Instant};
+
+/// Recently shown covers kept ready, so revisiting an album sends nothing.
+const ART_CACHE: usize = 48;
+/// A new cover loads once scrolling pauses for this long; holding a key
+/// down never pushes images to the terminal.
+const ART_DELAY: Duration = Duration::from_millis(70);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Artists,
+    Albums,
+    Songs,
+    Playlists,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Artists, Tab::Albums, Tab::Songs, Tab::Playlists];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Artists => "Artists",
+            Tab::Albums => "Albums",
+            Tab::Songs => "Songs",
+            Tab::Playlists => "Playlists",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    Artist(usize),
+    Album(usize),
+    Playlist(usize),
+    Track(usize),
+}
+
+/// How a track column is laid out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ColKind {
+    Names,
+    /// Inside an album: track number, title, length.
+    AlbumTracks,
+    /// Mixed tracks: title, artist, album, length.
+    Tracks,
+}
+
+pub struct Column {
+    pub title: String,
+    pub kind: ColKind,
+    all: Vec<Item>,
+    pub items: Vec<Item>,
+    pub state: TableState,
+    pub filter: String,
+}
+
+impl Column {
+    fn new(title: impl Into<String>, kind: ColKind, items: Vec<Item>) -> Self {
+        let mut state = TableState::default();
+        if !items.is_empty() {
+            state.select(Some(0));
+        }
+        Self { title: title.into(), kind, all: items.clone(), items, state, filter: String::new() }
+    }
+
+    pub fn selected(&self) -> Option<Item> {
+        self.items.get(self.state.selected()?).copied()
+    }
+}
+
+pub struct App {
+    pub ipod: Ipod,
+    pub index: Index,
+    pub tab: Tab,
+    pub cols: Vec<Column>,
+    pub focus: usize,
+    pub filtering: bool,
+    pub quit: bool,
+    pub picker: Picker,
+    /// The shown cover, keyed by album index (all of an album's tracks
+    /// share one image). `None` inside means the album has no art.
+    pub art: Option<(usize, Option<StatefulProtocol>)>,
+    /// Most recent first.
+    art_cache: Vec<(usize, Option<StatefulProtocol>)>,
+    pub art_pending: Option<(usize, Instant)>,
+    pub import: Option<ImportView>,
+    pub status: Option<String>,
+}
+
+impl App {
+    pub fn new(ipod: Ipod, picker: Picker) -> Self {
+        let index = Index::build(&ipod.db.tracks);
+        let mut app = Self {
+            ipod,
+            index,
+            tab: Tab::Artists,
+            cols: Vec::new(),
+            focus: 0,
+            filtering: false,
+            quit: false,
+            picker,
+            art: None,
+            art_cache: Vec::new(),
+            art_pending: None,
+            import: None,
+            status: None,
+        };
+        app.set_tab(Tab::Artists);
+        app
+    }
+
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.focus = 0;
+        let root = match tab {
+            Tab::Artists => Column::new(
+                "Artists",
+                ColKind::Names,
+                (0..self.index.artists.len()).map(Item::Artist).collect(),
+            ),
+            Tab::Albums => Column::new(
+                "Albums",
+                ColKind::Names,
+                (0..self.index.albums.len()).map(Item::Album).collect(),
+            ),
+            Tab::Songs => Column::new(
+                "Songs",
+                ColKind::Tracks,
+                self.index.songs.iter().map(|&i| Item::Track(i)).collect(),
+            ),
+            Tab::Playlists => Column::new(
+                "Playlists",
+                ColKind::Names,
+                (0..self.ipod.db.playlists.len()).map(Item::Playlist).collect(),
+            ),
+        };
+        self.cols = vec![root];
+        self.rebuild_from(0);
+    }
+
+    /// Recompute every column to the right of `col` from its selection.
+    fn rebuild_from(&mut self, col: usize) {
+        self.cols.truncate(col + 1);
+        while let Some(next) = self.cols.last().and_then(|c| c.selected()).and_then(|it| self.children(it)) {
+            self.cols.push(next);
+        }
+        self.refresh_art();
+    }
+
+    fn children(&self, item: Item) -> Option<Column> {
+        let ix = &self.index;
+        Some(match item {
+            Item::Artist(a) => Column::new(
+                ix.artists[a].name.clone(),
+                ColKind::Names,
+                ix.artists[a].albums.iter().map(|&i| Item::Album(i)).collect(),
+            ),
+            Item::Album(a) => Column::new(
+                ix.albums[a].title.clone(),
+                ColKind::AlbumTracks,
+                ix.albums[a].tracks.iter().map(|&i| Item::Track(i)).collect(),
+            ),
+            Item::Playlist(p) => {
+                let pl = &self.ipod.db.playlists[p];
+                Column::new(
+                    pl.name.clone(),
+                    ColKind::Tracks,
+                    pl.items.iter().filter_map(|id| ix.by_id.get(id)).map(|&i| Item::Track(i)).collect(),
+                )
+            }
+            Item::Track(_) => return None,
+        })
+    }
+
+    /// The track whose details and cover are shown: the focused one, or the
+    /// first track under the focused artist/album/playlist.
+    pub fn shown_track(&self) -> Option<usize> {
+        let mut item = self.cols.get(self.focus)?.selected()?;
+        loop {
+            item = match item {
+                Item::Track(t) => return Some(t),
+                Item::Artist(a) => Item::Album(*self.index.artists[a].albums.first()?),
+                Item::Album(a) => Item::Track(*self.index.albums[a].tracks.first()?),
+                Item::Playlist(p) => {
+                    let id = self.ipod.db.playlists[p].items.first()?;
+                    Item::Track(*self.index.by_id.get(id)?)
+                }
+            };
+        }
+    }
+
+    fn refresh_art(&mut self) {
+        let want = self.shown_track().map(|t| self.index.album_of[t]);
+        if want == self.art.as_ref().map(|(k, _)| *k) {
+            self.art_pending = None;
+            return;
+        }
+        let Some(key) = want else {
+            self.stash_art();
+            self.art_pending = None;
+            return;
+        };
+        if let Some(pos) = self.art_cache.iter().position(|(k, _)| *k == key) {
+            let entry = self.art_cache.remove(pos);
+            self.stash_art();
+            self.art = Some(entry);
+            self.art_pending = None;
+        } else {
+            self.art_pending = Some((key, Instant::now() + ART_DELAY));
+        }
+    }
+
+    fn stash_art(&mut self) {
+        if let Some(cur) = self.art.take() {
+            self.art_cache.insert(0, cur);
+            self.art_cache.truncate(ART_CACHE);
+        }
+    }
+
+    fn load_pending_art(&mut self) -> bool {
+        let Some((key, due)) = self.art_pending else { return false };
+        if Instant::now() < due {
+            return false;
+        }
+        self.art_pending = None;
+        let img = self.index.albums[key]
+            .tracks
+            .iter()
+            .find_map(|&t| self.ipod.art.best_thumb(self.ipod.db.tracks[t].dbid))
+            .and_then(|th| self.ipod.art.load(th).ok());
+        let proto = img.map(|i| self.picker.new_resize_protocol(i));
+        self.stash_art();
+        self.art = Some((key, proto));
+        true
+    }
+
+    /// When the event loop must wake up next even without input.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.art_pending.map(|(_, due)| due)
+    }
+
+    fn open_import(&mut self) -> &mut ImportView {
+        let on_ipod = self.ipod.db.tracks.iter().map(import::dup_key).collect();
+        let root = self.ipod.root.clone();
+        self.import.get_or_insert_with(|| ImportView::new(root, on_ipod))
+    }
+
+    /// Dropped files (Kitty pastes their paths) open the Add music screen.
+    pub fn on_paste(&mut self, text: &str) {
+        self.open_import().on_paste(text);
+    }
+
+    /// Poll background work. Returns true if a redraw is needed.
+    pub fn tick(&mut self) -> bool {
+        let art = self.load_pending_art();
+        let Some(view) = &mut self.import else { return art };
+        let changed = view.tick() || art;
+        if let Some(library_changed) = view.closed {
+            self.import = None;
+            if library_changed {
+                self.reload();
+            }
+            return true;
+        }
+        changed
+    }
+
+    fn reload(&mut self) {
+        match Ipod::open(&self.ipod.root) {
+            Ok(ipod) => {
+                self.status = Some(format!("Library reloaded: {} songs.", ipod.db.tracks.len()));
+                self.index = Index::build(&ipod.db.tracks);
+                self.ipod = ipod;
+                self.art = None;
+                self.art_cache.clear();
+                self.set_tab(self.tab);
+            }
+            Err(e) => self.status = Some(format!("Couldn't reload the iPod: {e:#}")),
+        }
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) {
+        self.status = None;
+        if let Some(view) = &mut self.import {
+            view.on_key(key);
+            self.tick();
+            return;
+        }
+        if self.filtering {
+            return self.on_filter_key(key);
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Char('1') => self.set_tab(Tab::Artists),
+            KeyCode::Char('2') => self.set_tab(Tab::Albums),
+            KeyCode::Char('3') => self.set_tab(Tab::Songs),
+            KeyCode::Char('4') => self.set_tab(Tab::Playlists),
+            KeyCode::Tab => {
+                let i = Tab::ALL.iter().position(|&t| t == self.tab).unwrap_or(0);
+                self.set_tab(Tab::ALL[(i + 1) % Tab::ALL.len()]);
+            }
+            KeyCode::BackTab => {
+                let i = Tab::ALL.iter().position(|&t| t == self.tab).unwrap_or(0);
+                self.set_tab(Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()]);
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
+            KeyCode::PageDown => self.move_by(20),
+            KeyCode::PageUp => self.move_by(-20),
+            KeyCode::Char('d') if ctrl => self.move_by(20),
+            KeyCode::Char('u') if ctrl => self.move_by(-20),
+            KeyCode::Home | KeyCode::Char('g') => self.move_by(isize::MIN / 2),
+            KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX / 2),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                if self.focus + 1 < self.cols.len() {
+                    self.focus += 1;
+                    self.refresh_art();
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+                if self.focus > 0 {
+                    self.focus -= 1;
+                    self.refresh_art();
+                }
+            }
+            KeyCode::Char('/') => {
+                self.filtering = true;
+            }
+            KeyCode::Char('a') => {
+                self.open_import();
+            }
+            KeyCode::Char('e') => {
+                self.status = Some(match crate::device::eject(&self.ipod.root) {
+                    Ok(()) => "iPod ejected — safe to unplug.".into(),
+                    Err(e) => format!("Eject failed: {e:#}"),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn on_filter_key(&mut self, key: KeyEvent) {
+        let col = &mut self.cols[self.focus];
+        match key.code {
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Esc => {
+                self.filtering = false;
+                col.filter.clear();
+            }
+            KeyCode::Backspace => {
+                col.filter.pop();
+            }
+            KeyCode::Char(c) => col.filter.push(c),
+            _ => return,
+        }
+        self.apply_filter();
+    }
+
+    fn apply_filter(&mut self) {
+        let needle = self.cols[self.focus].filter.to_lowercase();
+        let all = self.cols[self.focus].all.clone();
+        let items: Vec<Item> = if needle.is_empty() {
+            all
+        } else {
+            all.into_iter().filter(|&it| self.search_text(it).to_lowercase().contains(&needle)).collect()
+        };
+        let col = &mut self.cols[self.focus];
+        col.state.select((!items.is_empty()).then_some(0));
+        col.items = items;
+        self.rebuild_from(self.focus);
+    }
+
+    fn search_text(&self, item: Item) -> String {
+        match item {
+            Item::Artist(a) => self.index.artists[a].name.clone(),
+            Item::Album(a) => format!("{} {}", self.index.albums[a].title, self.index.albums[a].artist),
+            Item::Playlist(p) => self.ipod.db.playlists[p].name.clone(),
+            Item::Track(t) => {
+                let t = &self.ipod.db.tracks[t];
+                format!("{} {} {}", t.title, t.artist, t.album)
+            }
+        }
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        let col = &mut self.cols[self.focus];
+        if col.items.is_empty() {
+            return;
+        }
+        let cur = col.state.selected().unwrap_or(0) as isize;
+        let next = cur.saturating_add(delta).clamp(0, col.items.len() as isize - 1) as usize;
+        if Some(next) != col.state.selected() {
+            col.state.select(Some(next));
+            self.rebuild_from(self.focus);
+        }
+    }
+}
