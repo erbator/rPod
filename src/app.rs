@@ -319,6 +319,12 @@ impl App {
         self.cover = Some(CoverPicker::new(self.ipod.root.clone(), title, tracks, self.picker.clone(), write_files));
     }
 
+    /// Whether `c` has something to put a cover on: marked tracks, or a
+    /// focused album, song or playlist. An artist spans several albums.
+    pub fn can_pick_cover(&self) -> bool {
+        !self.marked.is_empty() || !matches!(self.cols.get(self.focus).and_then(|c| c.selected()), Some(Item::Artist(_)))
+    }
+
     /// The tracks `i` edits: the marked ones, else everything under the
     /// focused row. Returns them with a title for the editor.
     fn edit_targets(&self) -> Option<(String, Vec<usize>)> {
@@ -556,7 +562,7 @@ impl App {
             }
             KeyCode::Char('i') => self.open_editor(),
             KeyCode::Char('C') => self.open_fix(),
-            KeyCode::Char('c') if !ctrl => {
+            KeyCode::Char('c') if !ctrl && self.can_pick_cover() => {
                 if let Some((title, tracks)) = self.edit_targets() {
                     let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();
                     self.open_cover_picker(title, tracks);

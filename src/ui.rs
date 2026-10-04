@@ -317,6 +317,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ];
         Line::from(
             keys.iter()
+                .filter(|(k, _)| *k != "c" || app.can_pick_cover())
                 .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
                 .collect::<Vec<_>>(),
         )
