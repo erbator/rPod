@@ -39,11 +39,11 @@ pub fn apply(root: &Path, jobs: &[Assignment], write_files: bool) -> Result<Repo
     }
 
     use rayon::prelude::*;
-    let decoded: Vec<(Arc<DynamicImage>, Vec<u8>, u32)> = jobs
+    let decoded: Vec<(Arc<DynamicImage>, Option<Vec<u8>>, u32)> = jobs
         .par_iter()
         .map(|j| {
             let img = image::load_from_memory(&j.image).context("decoding cover image")?;
-            let jpeg = embed_jpeg(&img)?;
+            let jpeg = if write_files { Some(embed_jpeg(&img)?) } else { None };
             Ok((Arc::new(img.thumbnail(480, 480)), jpeg, j.image.len() as u32))
         })
         .collect::<Result<_>>()?;
@@ -83,6 +83,7 @@ pub fn apply(root: &Path, jobs: &[Assignment], write_files: bool) -> Result<Repo
     let mut file_errors = Vec::new();
     if write_files {
         for (j, (_, jpeg, _)) in jobs.iter().zip(&decoded) {
+            let Some(jpeg) = jpeg else { continue };
             for t in &j.tracks {
                 if let Err(e) = tags::embed_cover(&root.join(&t.location), jpeg) {
                     file_errors.push(format!("{}: {e:#}", t.title));

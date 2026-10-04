@@ -501,8 +501,8 @@ fn ffmpeg_args(item: &Item, t: Target, out: &Path) -> Vec<String> {
     a
 }
 
-/// Pick a free `iPod_Control/Music/Fxx/ABCD.ext` path.
-fn ipod_dest(root: &Path, ext: &str) -> Result<PathBuf> {
+/// The iPod's `iPod_Control/Music/Fxx` folders, creating `F00` if there are none.
+fn music_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let music = root.join("iPod_Control/Music");
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&music)?
         .filter_map(|e| e.ok())
@@ -514,6 +514,11 @@ fn ipod_dest(root: &Path, ext: &str) -> Result<PathBuf> {
         std::fs::create_dir_all(&d)?;
         dirs.push(d);
     }
+    Ok(dirs)
+}
+
+/// Pick a free `Fxx/ABCD.ext` path in one of `dirs`.
+fn ipod_dest(dirs: &[PathBuf], ext: &str) -> PathBuf {
     const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     loop {
         let r = rand_u64();
@@ -521,7 +526,7 @@ fn ipod_dest(root: &Path, ext: &str) -> Result<PathBuf> {
         let name: String = (0..4).map(|i| ALPHA[((r >> (8 + i * 6)) % 36) as usize] as char).collect();
         let p = dir.join(format!("{name}.{ext}"));
         if !p.exists() {
-            return Ok(p);
+            return p;
         }
     }
 }
@@ -529,8 +534,9 @@ fn ipod_dest(root: &Path, ext: &str) -> Result<PathBuf> {
 const COVER_NAMES: &[&str] = &["cover", "folder", "front", "album", "albumart", "albumartsmall"];
 
 /// Raw bytes of the embedded front cover, else of a cover image next to the file.
-fn find_art(src: &Path, folder_art: bool) -> Option<Vec<u8>> {
-    if let Ok(tagged) = lofty::read_from_path(src) {
+/// `has_art` and `folder_art` come from the scan, so files without either aren't read again.
+fn find_art(src: &Path, has_art: bool, folder_art: bool) -> Option<Vec<u8>> {
+    if has_art && let Ok(tagged) = lofty::read_from_path(src) {
         for tag in tagged.tags() {
             let pics = tag.pictures();
             if let Some(p) = pics.iter().find(|p| p.pic_type() == PictureType::CoverFront).or(pics.first()) {
@@ -600,6 +606,7 @@ struct Prepared {
 /// Transcode/copy one item onto the iPod.
 fn prepare(
     root: &Path,
+    dirs: &[PathBuf],
     item: &Item,
     action: &Action,
     settings: &Settings,
@@ -627,12 +634,22 @@ fn prepare(
         }
     };
 
-    // Final properties come from the file that lands on the iPod.
-    let tagged = lofty::read_from_path(&src)?;
-    let props = tagged.properties();
+    // Final properties come from the file that lands on the iPod; a straight
+    // copy has the ones the scan already read.
+    let (length_ms, bitrate, sample_rate) = if src == item.src {
+        (item.meta.length_ms, item.meta.bitrate, item.meta.sample_rate)
+    } else {
+        let tagged = lofty::read_from_path(&src)?;
+        let props = tagged.properties();
+        (
+            props.duration().as_millis() as u32,
+            props.audio_bitrate().or(props.overall_bitrate()).unwrap_or(item.meta.bitrate),
+            props.sample_rate().unwrap_or(item.meta.sample_rate),
+        )
+    };
     let is_alac = matches!(action, Action::Convert(Target::Alac)) || (item.codec == Codec::Alac && *action == Action::Copy);
 
-    let dest = ipod_dest(root, &ext)?;
+    let dest = ipod_dest(dirs, &ext);
     {
         let _lock = usb.lock().unwrap(); // the iPod's hard disk hates parallel writes
         tx.send(Progress::Item(idx, Status::Working("copying"))).ok();
@@ -646,7 +663,8 @@ fn prepare(
         .cover
         .as_ref()
         .map(|b| b.to_vec())
-        .or_else(|| find_art(&item.src, settings.folder_art))
+        // Folder art is still the fallback if embedded art turns out unreadable.
+        .or_else(|| find_art(&item.src, item.has_art, settings.folder_art && (item.folder_art || item.has_art)))
         .and_then(|bytes| decode_cover(bytes, art_cache));
 
     let (kind, filetype) = kind_of(&dest, is_alac);
@@ -655,9 +673,9 @@ fn prepare(
     meta.location = rel;
     meta.kind = kind;
     meta.size = std::fs::metadata(&dest)?.len() as u32;
-    meta.length_ms = props.duration().as_millis() as u32;
-    meta.bitrate = props.audio_bitrate().or(props.overall_bitrate()).unwrap_or(meta.bitrate);
-    meta.sample_rate = props.sample_rate().unwrap_or(meta.sample_rate);
+    meta.length_ms = length_ms;
+    meta.bitrate = bitrate;
+    meta.sample_rate = sample_rate;
     meta.dbid = rand_u64();
     let vbr = matches!(action, Action::Convert(Target::Mp3V0));
     Ok(Prepared { track: NewTrack { meta, filetype, vbr, artwork: None }, file: dest, art })
@@ -685,13 +703,14 @@ fn run_inner(root: &Path, items: &[Item], settings: &Settings, tx: &Sender<Progr
 
     let tmp = std::env::temp_dir().join(format!("rpod-{}", std::process::id()));
     std::fs::create_dir_all(&tmp)?;
+    let dirs = music_dirs(root)?;
     let usb = Mutex::new(());
     let art_cache: ArtCache = Mutex::new(HashMap::new());
     let pool = rayon::ThreadPoolBuilder::new().num_threads(settings.jobs.max(1)).build()?;
     let results: Vec<(usize, Result<Prepared>)> = pool.install(|| {
         work.par_iter()
             .map(|(i, action)| {
-                let r = prepare(root, &items[*i], action, settings, &tmp, *i, &usb, &art_cache, tx);
+                let r = prepare(root, &dirs, &items[*i], action, settings, &tmp, *i, &usb, &art_cache, tx);
                 let status = match &r {
                     Ok(_) => Status::Working("waiting for database"),
                     Err(e) => Status::Failed(format!("{e:#}")),
