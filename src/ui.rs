@@ -5,7 +5,8 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, TableState, Wrap};
+use crate::player::Repeat;
+use ratatui::widgets::{Block, BorderType, Cell, LineGauge, Paragraph, Row, Table, TableState, Wrap};
 use ratatui_image::{Resize, StatefulImage};
 
 const ACCENT: Color = Color::Cyan;
@@ -34,8 +35,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         return;
     }
+    let bar_height = if app.player.now().is_some() { 2 } else { 0 };
+    let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).areas(body);
     let [cols_area, detail_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(DETAIL_WIDTH)]).areas(body);
+    draw_now_playing(f, app, bar);
     draw_columns(f, app, cols_area);
     draw_detail(f, app, detail_area);
     draw_footer(f, app, footer);
@@ -45,6 +49,56 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(view) = &mut app.cover {
         view.draw(f, f.area());
     }
+}
+
+fn draw_now_playing(f: &mut Frame, app: &App, area: Rect) {
+    let Some((t, pos, paused)) = app.player.now() else { return };
+    let [top, gauge] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    let mut spans = vec![
+        Span::styled(if paused { " ⏸ " } else { " ▶ " }, Style::new().fg(ACCENT).bold()),
+        Span::styled(t.title.as_str(), Style::new().bold()),
+    ];
+    if !t.artist.is_empty() {
+        spans.push(Span::styled(format!(" — {}", t.artist), Style::new().fg(Color::Gray)));
+    }
+    if !t.album.is_empty() {
+        spans.push(Span::styled(format!(" · {}", t.album), Style::new().fg(DIM)));
+    }
+    f.render_widget(Line::from(spans), top);
+
+    let on = |lit: bool| Style::new().fg(if lit { ACCENT } else { DIM });
+    let repeat = match app.player.repeat {
+        Repeat::Off => "repeat",
+        Repeat::All => "repeat all",
+        Repeat::One => "repeat one",
+    };
+    let key = |k: &'static str| Span::styled(k, Style::new().fg(ACCENT));
+    let state = Line::from(vec![
+        key("p"),
+        Span::styled(if paused { " play  " } else { " pause  " }, Style::new().fg(DIM)),
+        key("< >"),
+        Span::styled(" skip  ", Style::new().fg(DIM)),
+        key("[ ]"),
+        Span::styled(" seek  ", Style::new().fg(DIM)),
+        key("- +"),
+        Span::styled(format!(" vol {}%  ", app.player.volume), Style::new().fg(DIM)),
+        key("z"),
+        Span::styled(" shuffle  ", on(app.player.shuffle)),
+        key("r"),
+        Span::styled(format!(" {repeat} "), on(app.player.repeat != Repeat::Off)),
+    ])
+    .right_aligned();
+    f.render_widget(state, top);
+
+    let length = t.length_ms as u64;
+    let ratio = if length > 0 { (pos.as_millis() as f64 / length as f64).min(1.0) } else { 0.0 };
+    let label = format!(" {} / {} ", fmt_duration(pos.as_millis() as u32), fmt_duration(t.length_ms));
+    let g = LineGauge::default()
+        .filled_style(Style::new().fg(ACCENT))
+        .unfilled_style(Style::new().fg(DIM))
+        .ratio(ratio)
+        .label(label);
+    f.render_widget(g, gauge);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -168,14 +222,22 @@ fn row_for<'a>(app: &'a App, kind: ColKind, item: Item) -> Row<'a> {
         Item::Track(t) => {
             let tr = &app.ipod.db.tracks[t];
             let dur = dim(fmt_duration(tr.length_ms));
-            let mark = if app.marked.contains(&t) { Style::new().fg(Color::Yellow) } else { Style::new() };
+            let playing = app.player.playing_dbid() == Some(tr.dbid);
+            let mark = if app.marked.contains(&t) {
+                Style::new().fg(Color::Yellow)
+            } else if playing {
+                Style::new().fg(ACCENT)
+            } else {
+                Style::new()
+            };
+            let title = if playing { Cell::from(format!("♪ {}", tr.title)) } else { Cell::from(tr.title.as_str()) };
             let row = match kind {
                 ColKind::AlbumTracks => {
                     let no = if tr.track_no > 0 { tr.track_no.to_string() } else { String::new() };
-                    Row::new(vec![dim(no), Cell::from(tr.title.as_str()), dur])
+                    Row::new(vec![dim(no), title, dur])
                 }
                 _ => Row::new(vec![
-                    Cell::from(tr.title.as_str()),
+                    title,
                     Cell::from(Line::from(tr.artist.as_str()).fg(Color::Gray)),
                     Cell::from(Line::from(tr.album.as_str()).fg(DIM)),
                     dur,
@@ -307,6 +369,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Line::from(format!(" {msg}")).fg(Color::Yellow)
     } else {
         let keys = [
+            ("enter", "play"),
             ("i", "edit"),
             ("c", "cover"),
             ("C", "fix covers"),

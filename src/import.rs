@@ -81,6 +81,8 @@ pub struct Settings {
     pub embed_covers: bool,
     /// Where `d` and `S` copy songs off the iPod.
     pub download_dir: PathBuf,
+    /// Player volume, 0–100.
+    pub volume: u8,
 }
 
 impl Default for Settings {
@@ -95,6 +97,7 @@ impl Default for Settings {
             write_tags: true,
             embed_covers: false,
             download_dir: std::env::var_os("HOME").map_or_else(|| PathBuf::from("Music"), |h| PathBuf::from(h).join("Music")),
+            volume: 80,
         }
     }
 }

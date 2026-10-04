@@ -35,9 +35,9 @@ sha256_check() {
 [ "$(uname -s)" = Linux ] || die "rPod currently supports Linux only."
 
 case "$(uname -m)" in
-    x86_64 | amd64)  TARGET=x86_64-unknown-linux-musl ;;
-    aarch64 | arm64) TARGET=aarch64-unknown-linux-musl ;;
-    *)               TARGET="" ;;
+    x86_64 | amd64)  ARCH=x86_64 ;;
+    aarch64 | arm64) ARCH=aarch64 ;;
+    *)               ARCH="" ;;
 esac
 
 if [ "$VERSION" = latest ]; then
@@ -51,10 +51,11 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 mkdir -p "$BIN_DIR"
 
 installed=""
-if [ -n "$TARGET" ]; then
+# Releases up to v0.2.0 were static musl builds; later ones link glibc and ALSA.
+for TARGET in ${ARCH:+"$ARCH-unknown-linux-gnu" "$ARCH-unknown-linux-musl"}; do
     asset="rpod-$TARGET.tar.gz"
-    say "Downloading $asset ($VERSION)"
     if fetch "$BASE/$asset" "$tmp/$asset" 2>/dev/null; then
+        say "Downloaded $asset ($VERSION)"
         if fetch "$BASE/$asset.sha256" "$tmp/$asset.sha256" 2>/dev/null; then
             (cd "$tmp" && sha256_check "$asset.sha256") || die "checksum mismatch for $asset"
         else
@@ -70,13 +71,14 @@ if [ -n "$TARGET" ]; then
             fi
         done
         installed=1
-    else
-        warn "no prebuilt binary for $TARGET; falling back to building from source"
+        break
     fi
-fi
+done
+[ -n "$installed" ] || warn "no prebuilt binary for this machine; falling back to building from source"
 
 if [ -z "$installed" ]; then
     have cargo || die "no prebuilt binary for this machine and cargo isn't installed (get it from https://rustup.rs)"
+    have pkg-config && pkg-config --exists alsa || warn "ALSA headers not found; install alsa-lib / libasound2-dev if the build fails"
     say "Building rPod from source with cargo (this takes a few minutes)"
     if [ "$VERSION" = latest ]; then
         cargo install --locked --git "https://github.com/$REPO" --root "$tmp/cargo" rpod
@@ -86,7 +88,10 @@ if [ -z "$installed" ]; then
     install -m 755 "$tmp/cargo/bin/rpod" "$BIN_DIR/rpod"
 fi
 
-say "Installed $("$BIN_DIR/rpod" --version) to $BIN_DIR/rpod"
+version=$("$BIN_DIR/rpod" --version 2>&1) ||
+    die "rpod won't start: $version
+Install your distro's ALSA library (alsa-lib, or libasound2 on Debian/Ubuntu) and run it again."
+say "Installed $version to $BIN_DIR/rpod"
 
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;

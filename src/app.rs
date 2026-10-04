@@ -8,6 +8,7 @@ use crate::fixui::{AlbumRow, FixView};
 use crate::import;
 use crate::importui::ImportView;
 use crate::library::Index;
+use crate::player::Player;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use ratatui_image::picker::Picker;
@@ -103,6 +104,7 @@ pub struct App {
     pub cover: Option<CoverPicker>,
     pub fix: Option<FixView>,
     pub download: Option<DownloadView>,
+    pub player: Player,
     /// The fix-covers row the open cover picker belongs to.
     picker_for_fix: Option<usize>,
     /// The open cover picker is choosing a cover for the Add music queue.
@@ -115,6 +117,7 @@ pub struct App {
 impl App {
     pub fn new(ipod: Ipod, picker: Picker) -> Self {
         let index = Index::build(&ipod.db.tracks);
+        let player = Player::new(ipod.root.clone(), import::Settings::load().volume);
         let mut app = Self {
             ipod,
             index,
@@ -132,6 +135,7 @@ impl App {
             cover: None,
             fix: None,
             download: None,
+            player,
             picker_for_fix: None,
             picker_for_import: false,
             marked: HashSet::new(),
@@ -355,6 +359,31 @@ impl App {
         })
     }
 
+    /// Play the focused column from the selected song on: the rest of the
+    /// album, playlist or list is the queue.
+    fn play_selected(&mut self) {
+        let col = &self.cols[self.focus];
+        let Some(Item::Track(sel)) = col.selected() else { return };
+        let songs: Vec<usize> = col
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Track(t) if *t == sel || !crate::export::is_video(&self.ipod.db.tracks[*t]) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        let start = songs.iter().position(|&t| t == sel).unwrap_or(0);
+        let queue = songs.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();
+        self.player.play(queue, start);
+    }
+
+    fn change_volume(&mut self, delta: i8) {
+        self.player.change_volume(delta);
+        let mut settings = import::Settings::load();
+        settings.volume = self.player.volume;
+        settings.save();
+    }
+
     /// `d` downloads the selection (like `i` edits it), `S` the whole library.
     fn open_download(&mut self, everything: bool) {
         let (title, tracks) = if everything {
@@ -385,8 +414,17 @@ impl App {
         self.edit = Some(EditView::new(self.ipod.root.clone(), title, tracks, cover, write_files));
     }
 
-    /// Poll background work. Returns true if a redraw is needed.
+    /// Poll background work and the player. Returns true if a redraw is needed.
     pub fn tick(&mut self) -> bool {
+        let mut playing = self.player.tick();
+        if let Some(e) = self.player.error.take() {
+            self.status = Some(e);
+            playing = true;
+        }
+        self.tick_views() | playing
+    }
+
+    fn tick_views(&mut self) -> bool {
         let art = self.load_pending_art();
         if let Some(view) = &mut self.cover {
             let changed = view.tick();
@@ -575,6 +613,16 @@ impl App {
             KeyCode::Char('u') if ctrl => self.move_by(-20),
             KeyCode::Home | KeyCode::Char('g') => self.move_by(isize::MIN / 2),
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX / 2),
+            KeyCode::Enter if matches!(self.cols[self.focus].selected(), Some(Item::Track(_))) => self.play_selected(),
+            KeyCode::Char('p') => self.player.toggle_pause(),
+            KeyCode::Char('>') => self.player.next(),
+            KeyCode::Char('<') => self.player.prev(),
+            KeyCode::Char(']') => self.player.seek(10),
+            KeyCode::Char('[') => self.player.seek(-10),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(5),
+            KeyCode::Char('-') => self.change_volume(-5),
+            KeyCode::Char('z') => self.player.toggle_shuffle(),
+            KeyCode::Char('r') => self.player.cycle_repeat(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
                 if self.focus + 1 < self.cols.len() {
                     self.focus += 1;
@@ -612,6 +660,8 @@ impl App {
                 }
             }
             KeyCode::Char('e') => {
+                // An open song file would keep the iPod from unmounting.
+                self.player.stop();
                 self.status = Some(match crate::device::eject(&self.ipod.root) {
                     Ok(()) => "iPod ejected — safe to unplug.".into(),
                     Err(e) => format!("Eject failed: {e:#}"),

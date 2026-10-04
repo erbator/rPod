@@ -1,6 +1,8 @@
 name: Release
 
-# Push a tag like v0.1.0 to build static Linux binaries and publish a release.
+# Push a tag like v0.1.0 to build Linux binaries and publish a release. They
+# link glibc and ALSA (the player needs it), so they're built on Ubuntu 22.04
+# to run on any distro with glibc 2.35 or newer.
 on:
   push:
     tags: ["v*"]
@@ -13,10 +15,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +27,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # ring (TLS crypto) compiles C code, which needs a musl C compiler.
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - uses: taiki-e/install-action@v2
         with:

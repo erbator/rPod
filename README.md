@@ -36,6 +36,7 @@ the iPod Video 5G/5.5G.
 | Covers | Search Apple's catalogue in a grid of covers, or fix every missing cover in one pass |
 | Adding music | Drag and drop, parallel ffmpeg conversion, duplicate and free-space checks |
 | Downloading | Copy songs back to your PC with proper names and tags; later syncs copy only what's new |
+| Playing | Play songs straight off the iPod: gapless albums, shuffle, repeat, seeking |
 | Safety | Backs up before every write and checks the result before replacing anything |
 
 ## Compatibility
@@ -66,14 +67,16 @@ if that fails, the songs it copied are deleted again.
 
 ## Quick start
 
-Install a static binary for x86_64 or ARM64 Linux (checked against its SHA-256
-checksum; other machines build from source with cargo):
+Install a prebuilt binary for x86_64 or ARM64 Linux with glibc 2.35 or newer
+(checked against its SHA-256 checksum; other machines build from source with
+cargo):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | sh
 ```
 
-Or build it yourself with Rust 1.85 or newer:
+Or build it yourself with Rust 1.85 or newer and the ALSA headers (`alsa-lib`
+on Arch, `libasound2-dev` on Debian/Ubuntu):
 
 ```sh
 git clone https://github.com/erbator/rPod && cd rPod
@@ -95,6 +98,7 @@ the eject key. The install script takes `RPOD_VERSION` and `RPOD_INSTALL_DIR`;
 | Navigation | `↑↓` / `jk` move, `←→` / `hl` / `Enter` columns, `1`–`4` / `Tab` views, `g` `G` jump, `/` filter |
 | Editing | `i` edit selection, `space` mark tracks; in the editor `n` auto-number, `t` totals, `x` tidy, `f` tags to files, `Ctrl+S` save |
 | Covers | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `f` also embed in song files, `Ctrl+S` write |
+| Playing | `Enter` on a song plays from there, `p` pause, `<` `>` previous/next, `[` `]` seek 10 s, `-` `+` volume, `z` shuffle, `r` repeat |
 | Library | `a` add music, `d` download selection, `S` sync everything to PC, `e` eject, `q` quit |
 
 The cover picker hides albums by other artists and singles (`x` shows them),
@@ -130,6 +134,14 @@ Video's limit. Settings live in `~/.config/rpod/settings.json`.
 Before every write, rPod copies `iTunesDB` and `ArtworkDB` to
 `~/.local/share/rpod/backups/<FirewireGuid>/<unix-timestamp>/`. To undo a
 change, copy them back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
+
+## Playing
+
+`Enter` on a song plays it and then the rest of the list it's in: the album,
+playlist, artist or Songs view. The bar above the footer shows what's playing
+and the player keys. Sound goes through ALSA, so PipeWire and PulseAudio work
+as usual. Volume is remembered; ejecting stops playback first so the iPod can
+unmount.
 
 ## Downloading to your PC
 

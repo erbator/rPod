@@ -1,6 +1,6 @@
 # Config for cargo-about, which builds THIRD_PARTY_LICENSES.md for releases:
 #   cargo about generate about.hbs -o THIRD_PARTY_LICENSES.md
-targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 accepted = [
@@ -20,6 +20,8 @@ accepted = [
     "Unicode-DFS-2016",
     # Mozilla's CA certificates (webpki-roots), used to verify HTTPS to Apple.
     "CDLA-Permissive-2.0",
+    # Symphonia, rodio's MP3/AAC/ALAC decoder; used unmodified.
+    "MPL-2.0",
 ]
 
 # rPod's own license (not a third-party one).

@@ -16,6 +16,7 @@ mod itunesdb;
 mod import;
 mod importui;
 mod library;
+mod player;
 mod store;
 mod tags;
 mod ui;

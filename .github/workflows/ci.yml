@@ -1,7 +1,7 @@
 name: CI
 
-# Build the static release target and run the tests on every push, so a
-# broken build is caught before tagging a release.
+# Build the release binary and run the tests on every push, so a broken
+# build is caught before tagging a release.
 on:
   push:
     branches: [master]
@@ -9,19 +9,18 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
 
-      - name: Install musl tools and ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y musl-tools ffmpeg
+      # The player plays through ALSA (PipeWire and PulseAudio sit behind it).
+      - name: Install ALSA headers and ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev ffmpeg
 
       - name: Test
         run: cargo test --locked
 
-      - name: Build static binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Build release binary
+        run: cargo build --release --locked
