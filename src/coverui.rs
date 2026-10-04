@@ -75,6 +75,13 @@ pub struct CoverPicker {
     previews: HashMap<u64, Preview>,
     /// The user moved the selection; stop jumping to the best match.
     user_moved: bool,
+    /// Every iTunes result of the current search, before hiding unrelated ones.
+    results: Vec<AlbumHit>,
+    /// The current results come from a typed search: show everything.
+    manual: bool,
+    /// Show results by other artists and singles too (`x`).
+    show_all: bool,
+    hidden: usize,
     sel: usize,
     scroll: usize,
     /// Columns in the last drawn grid, for ↑↓ navigation.
@@ -113,6 +120,10 @@ impl CoverPicker {
             cards: Vec::new(),
             previews: HashMap::new(),
             user_moved: false,
+            results: Vec::new(),
+            manual: false,
+            show_all: false,
+            hidden: 0,
             sel: 0,
             scroll: 0,
             cols: 1,
@@ -140,6 +151,9 @@ impl CoverPicker {
         }
         self.generation += 1;
         self.cards.retain(|c| matches!(c.source, Source::Local(..)));
+        self.results.clear();
+        self.hidden = 0;
+        self.manual = !smart;
         self.sel = 0;
         self.scroll = 0;
         self.user_moved = false;
@@ -239,12 +253,24 @@ impl CoverPicker {
         changed
     }
 
-    /// Replace the iTunes cards with `hits`, best match first.
     fn set_results(&mut self, hits: Vec<AlbumHit>) {
+        self.results = hits;
+        self.rebuild_cards();
+    }
+
+    /// Rebuild the iTunes cards from the results, best match first, hiding
+    /// unrelated ones unless this was a typed search or `x` is on.
+    fn rebuild_cards(&mut self) {
         let selected = self.cards.get(self.sel).map(Card::id);
         self.cards.retain(|c| matches!(c.source, Source::Local(..)));
-        let mut cards: Vec<Card> =
-            hits.into_iter().map(|h| Card { score: itunes::score(&h, &self.wanted), source: Source::Itunes(h) }).collect();
+        let show_all = self.manual || self.show_all;
+        let (shown, hidden): (Vec<&AlbumHit>, Vec<&AlbumHit>) =
+            self.results.iter().partition(|h| show_all || itunes::plausible(h, &self.wanted));
+        self.hidden = hidden.len();
+        let mut cards: Vec<Card> = shown
+            .into_iter()
+            .map(|h| Card { score: itunes::score(h, &self.wanted), source: Source::Itunes(h.clone()) })
+            .collect();
         cards.sort_by(|a, b| b.score.total_cmp(&a.score));
         let locals = self.cards.len();
         self.cards.extend(cards);
@@ -325,6 +351,10 @@ impl CoverPicker {
                 self.sel = self.sel.saturating_sub(cols);
                 self.user_moved = true;
             }
+            KeyCode::Char('x') => {
+                self.show_all = !self.show_all;
+                self.rebuild_cards();
+            }
             KeyCode::Char('b') => {
                 // Jump to the best-scoring result.
                 if let Some((i, _)) = self.cards.iter().enumerate().max_by(|a, b| a.1.score.total_cmp(&b.1.score)) {
@@ -382,7 +412,12 @@ impl CoverPicker {
             self.draw_card(f, rect, i, Some(i) == best);
         }
         if self.cards.is_empty() && self.searching.is_none() && self.message.is_none() {
-            f.render_widget(Paragraph::new("\nNo results yet.").fg(DIM).centered(), grid);
+            let text = if self.hidden > 0 {
+                "\nNothing by this artist. Press x to see the other results, / to search, or drop an image."
+            } else {
+                "\nNo results yet."
+            };
+            f.render_widget(Paragraph::new(text).fg(DIM).centered(), grid);
         }
 
         let status_line = if let Some(t) = self.applying {
@@ -393,14 +428,19 @@ impl CoverPicker {
         } else if let Some(m) = &self.message {
             Line::from(format!(" {m}")).fg(Color::Yellow)
         } else {
-            Line::from(format!(" {} results · drop an image file here to use your own", self.cards.len())).fg(DIM)
+            let hidden = match (self.hidden, self.show_all) {
+                (0, _) => String::new(),
+                (n, false) => format!(" · {n} by other artists or singles hidden (x shows them)"),
+                (_, true) => " · showing everything (x hides unrelated)".into(),
+            };
+            Line::from(format!(" {} results{hidden} · drop an image file to use your own", self.cards.len())).fg(DIM)
         };
         f.render_widget(status_line, status);
 
         let help: &[(&str, &str)] = if self.editing_query {
             &[("enter", "search"), ("esc", "cancel")]
         } else {
-            &[("←→↑↓", "choose"), ("enter", "apply"), ("b", "best"), ("/", "search"), ("tab", "store"), ("esc", "close")]
+            &[("←→↑↓", "choose"), ("enter", "apply"), ("b", "best"), ("x", "show all"), ("/", "search"), ("tab", "store"), ("esc", "close")]
         };
         let spans: Vec<Span> = help
             .iter()
@@ -476,6 +516,7 @@ mod tests {
             let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
             println!("{line}");
         }
+        println!("shown {} hidden {}", p.cards.len(), p.hidden);
         let best = &p.cards[p.sel];
         match &best.source {
             Source::Itunes(h) => println!("selected: {} — {} ({:.2})", h.artist, h.album, best.score),

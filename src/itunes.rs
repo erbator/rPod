@@ -392,8 +392,25 @@ pub fn score(hit: &AlbumHit, w: &Wanted) -> f32 {
 }
 
 /// Index of the best result, its score, and whether it's confident.
+/// Whether a result could be the album at all. Apple pads searches with
+/// albums by other artists (same-name releases, AI-generated filler) and with
+/// singles; those are hidden rather than just ranked low.
+pub fn plausible(hit: &AlbumHit, w: &Wanted) -> bool {
+    // A one- or two-track release isn't a full album's cover.
+    if w.tracks >= 4 && hit.tracks > 0 && (hit.tracks as usize) * 4 <= w.tracks {
+        return false;
+    }
+    if generic_artist(&w.artist) {
+        return !same_script(&hit.album, &w.album) || similarity(&hit.album, &w.album) >= 0.4;
+    }
+    // A name in another script can't be compared, so it gets the benefit of the doubt.
+    !same_script(&hit.artist, &w.artist) || artist_similarity(&hit.artist, &w.artist) >= 0.5
+}
+
+/// Index of the best plausible result, its score, and whether it's confident.
 pub fn best_match(hits: &[AlbumHit], w: &Wanted) -> Option<(usize, f32, bool)> {
-    let mut scored: Vec<(usize, f32)> = hits.iter().enumerate().map(|(i, h)| (i, score(h, w))).collect();
+    let mut scored: Vec<(usize, f32)> =
+        hits.iter().enumerate().filter(|(_, h)| plausible(h, w)).map(|(i, h)| (i, score(h, w))).collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let (best, top) = *scored.first()?;
     let runner_up = scored.get(1).map_or(0.0, |s| s.1);
@@ -481,6 +498,22 @@ mod tests {
         let (i, _, confident) = best_match(&hits, &w).unwrap();
         assert_eq!(i, 1, "artist + 18 tracks beats the same-title albums by other artists");
         assert!(!confident, "a title match is missing, so a human confirms");
+    }
+
+    #[test]
+    fn unrelated_artists_and_singles_are_not_plausible() {
+        let w = want("Frankie Chan & Roel A. Garcia", "Fallen Angels (OST)", 0, 19);
+        assert!(plausible(&hit("Roel A. Gracia & Frankie Chan", "墮落天使(電影原聲大碟)", 2016, 18), &w));
+        assert!(!plausible(&hit("Fallen Angels", "Fallen Angels", 1984, 16), &w));
+        assert!(!plausible(&hit("Lofi Dreams Collective", "Fallen Angels (Chill Beats)", 2024, 19), &w));
+        assert!(!plausible(&hit("Frankie Chan", "Fallen Angels - Single", 2020, 1), &w), "single for an album");
+        assert!(plausible(&hit("坂本龍一", "Merry Christmas Mr. Lawrence", 1983, 19), &want("Ryuichi Sakamoto", "Merry Christmas Mr. Lawrence", 1983, 19)), "other script: unknown");
+        let various = want("Various Artists", "Pulp Fiction", 1994, 16);
+        assert!(plausible(&hit("Various Artists", "Pulp Fiction (Music from the Motion Picture)", 1994, 16), &various));
+        assert!(!plausible(&hit("Various Artists", "Now That's What I Call Music 42", 1999, 16), &various));
+        // Only plausible results can be the best match.
+        let hits = [hit("Fallen Angels", "Fallen Angels", 1984, 16), hit("Bob Dylan", "Fallen Angels", 2016, 12)];
+        assert!(best_match(&hits, &w).is_none());
     }
 
     #[test]

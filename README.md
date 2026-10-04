@@ -96,7 +96,8 @@ the eject key. The install script takes `RPOD_VERSION` and `RPOD_INSTALL_DIR`;
 | Covers | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `Ctrl+S` write |
 | Library | `a` add music, `e` eject, `q` quit |
 
-The cover picker searches with `/`, switches store country with `Tab`, and
+The cover picker hides albums by other artists and singles (`x` shows them),
+searches with `/`, switches store country with `Tab`, and
 accepts a dropped image file as your own cover. Always eject with `e` (or from
 your desktop) after a change; the iPod rebuilds its menus when ejected.
 
