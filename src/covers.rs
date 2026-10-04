@@ -93,6 +93,14 @@ pub fn apply(root: &Path, jobs: &[Assignment], write_files: bool) -> Result<Repo
     Ok(Report { tracks: edits.len(), file_errors })
 }
 
+/// Flip and save the "embed covers in song files" setting.
+pub fn toggle_embed_covers() -> bool {
+    let mut s = crate::import::Settings::load();
+    s.embed_covers = !s.embed_covers;
+    s.save();
+    s.embed_covers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,8 +123,12 @@ mod tests {
 
         let db = itunesdb::read(&store::itunesdb_path(&root)).unwrap();
         let art = artworkdb::read(&store::artwork_dir(&root)).unwrap();
-        let bare: Vec<Track> = db.tracks.iter().filter(|t| !art.by_track.contains_key(&t.dbid)).take(3).cloned().collect();
-        assert!(!bare.is_empty());
+        // Prefer tracks without art; fall back to replacing existing covers.
+        let mut bare: Vec<Track> = db.tracks.iter().filter(|t| !art.by_track.contains_key(&t.dbid)).take(3).cloned().collect();
+        if bare.is_empty() {
+            bare = db.tracks.iter().take(3).cloned().collect();
+        }
+        let new_entries = bare.iter().filter(|t| !art.by_track.contains_key(&t.dbid)).count();
         let mut png = Vec::new();
         DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1200, 1200, image::Rgb([0, 200, 0])))
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -132,7 +144,7 @@ mod tests {
             let px = art2.load(art2.best_thumb(t.dbid).unwrap()).unwrap().to_rgb8();
             assert!(px.get_pixel(50, 50)[1] > 190);
         }
-        assert_eq!(art2.by_track.len(), art.by_track.len() + bare.len());
+        assert_eq!(art2.by_track.len(), art.by_track.len() + new_entries);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

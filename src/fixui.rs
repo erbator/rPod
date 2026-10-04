@@ -195,11 +195,22 @@ impl FixView {
         let n = accepted.len();
         std::thread::spawn(move || {
             let res = (|| -> anyhow::Result<Report> {
-                let mut jobs = Vec::with_capacity(n);
-                for (i, (hit, tracks)) in accepted.into_iter().enumerate() {
-                    tx.send(Msg::Progress(format!("Downloading cover {}/{n}: {}", i + 1, hit.album))).ok();
-                    jobs.push(Assignment { tracks, image: itunes::fetch_cover(&hit)? });
-                }
+                // Downloads run in parallel; only the iPod writes are sequential.
+                use rayon::prelude::*;
+                let done = std::sync::atomic::AtomicUsize::new(0);
+                tx.send(Msg::Progress(format!("Downloading {n} covers…"))).ok();
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(6).build()?;
+                let jobs: Vec<Assignment> = pool.install(|| {
+                    accepted
+                        .into_par_iter()
+                        .map(|(hit, tracks)| {
+                            let image = itunes::fetch_cover(&hit)?;
+                            let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            tx.send(Msg::Progress(format!("Downloaded {d}/{n} covers"))).ok();
+                            Ok(Assignment { tracks, image })
+                        })
+                        .collect::<anyhow::Result<_>>()
+                })?;
                 tx.send(Msg::Progress("Writing to the iPod…".into())).ok();
                 covers::apply(&root, &jobs, write_files)
             })();
@@ -241,6 +252,7 @@ impl FixView {
                     }
                 }
             }
+            KeyCode::Char('f') => self.write_files = covers::toggle_embed_covers(),
             KeyCode::Enter => self.wants_picker = Some(sel),
             KeyCode::Down | KeyCode::Char('j') if n > 0 => self.table.select(Some((sel + 1).min(n - 1))),
             KeyCode::Up | KeyCode::Char('k') => self.table.select(Some(sel.saturating_sub(1))),
@@ -311,6 +323,7 @@ impl FixView {
                 ("a", "accept all confident"),
                 ("enter", "pick manually"),
                 ("ctrl+s", "apply accepted"),
+                ("f", if self.write_files { "embedding in files: on" } else { "embed in files" }),
                 ("esc", "back"),
             ];
             Line::from(

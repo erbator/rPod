@@ -75,6 +75,10 @@ pub struct Settings {
     pub folder_art: bool,
     /// Also write metadata edits into the audio files' tags.
     pub write_tags: bool,
+    /// Also embed new covers in the audio files. Off by default: the iPod
+    /// shows covers from its own artwork database, and embedding rewrites
+    /// every song file over USB (seconds per track).
+    pub embed_covers: bool,
 }
 
 impl Default for Settings {
@@ -87,6 +91,7 @@ impl Default for Settings {
             skip_duplicates: true,
             folder_art: true,
             write_tags: true,
+            embed_covers: false,
         }
     }
 }

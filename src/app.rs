@@ -307,7 +307,7 @@ impl App {
             self.status = Some("Every album already has a cover.".into());
             return;
         }
-        let write_files = import::Settings::load().write_tags;
+        let write_files = import::Settings::load().embed_covers;
         self.fix = Some(FixView::new(self.ipod.root.clone(), rows, self.picker.clone(), write_files));
     }
 
@@ -315,7 +315,7 @@ impl App {
         if tracks.is_empty() {
             return;
         }
-        let write_files = import::Settings::load().write_tags;
+        let write_files = import::Settings::load().embed_covers;
         self.cover = Some(CoverPicker::new(self.ipod.root.clone(), title, tracks, self.picker.clone(), write_files));
     }
 

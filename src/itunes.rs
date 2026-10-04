@@ -1,8 +1,7 @@
 //! Album covers from Apple's public iTunes Search API.
 //!
 //! Search results carry a 100×100 artwork URL; rewriting its size segment
-//! gets bigger versions, and another rewrite gets the label's original
-//! upload. (Technique from Ben Dodson's iTunes Artwork Finder.)
+//! gets bigger versions. (Technique from Ben Dodson's iTunes Artwork Finder.)
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -35,16 +34,10 @@ impl AlbumHit {
         self.art100.replace("100x100", "600x600")
     }
 
-    /// A 3000×3000 JPEG (or the largest size below that Apple has).
-    pub fn hires_url(&self) -> String {
-        self.art100.replace("100x100bb", "3000x3000bb")
-    }
-
-    /// The label's original upload, uncompressed by Apple's resizer.
-    pub fn original_url(&self) -> Option<String> {
-        let (_, rest) = self.art100.split_once("/image/thumb/")?;
-        let (path, _size) = rest.rsplit_once('/')?;
-        Some(format!("https://a5.mzstatic.com/us/r1000/0/{path}"))
+    /// A 1000×1000 JPEG: enough for the iPod's thumbnails and for embedding,
+    /// at a fifth of the 3000 px download.
+    pub fn cover_url(&self) -> String {
+        self.art100.replace("100x100bb", "1000x1000bb")
     }
 }
 
@@ -245,11 +238,9 @@ pub fn download(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// The biggest cover available: 3000 px, else the original, else 600 px.
+/// The cover at 1000 px, falling back to the 600 px preview.
 pub fn fetch_cover(hit: &AlbumHit) -> Result<Vec<u8>> {
-    download(&hit.hires_url())
-        .or_else(|e| hit.original_url().map_or(Err(e), |u| download(&u)))
-        .or_else(|_| download(&hit.preview_url()))
+    download(&hit.cover_url()).or_else(|_| download(&hit.preview_url()))
 }
 
 // ---------------------------------------------------------------- matching
@@ -447,10 +438,9 @@ mod tests {
             "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/600x600bb.jpg"
         );
         assert_eq!(
-            hits[0].hires_url(),
-            "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/3000x3000bb.jpg"
+            hits[0].cover_url(),
+            "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/1000x1000bb.jpg"
         );
-        assert_eq!(hits[0].original_url().unwrap(), "https://a5.mzstatic.com/us/r1000/0/Music125/v4/aa/bb/cc/x.jpg");
     }
 
     #[test]

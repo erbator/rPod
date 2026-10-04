@@ -351,6 +351,7 @@ impl CoverPicker {
                 self.sel = self.sel.saturating_sub(cols);
                 self.user_moved = true;
             }
+            KeyCode::Char('f') if !self.choose_only => self.write_files = covers::toggle_embed_covers(),
             KeyCode::Char('x') => {
                 self.show_all = !self.show_all;
                 self.rebuild_cards();
@@ -433,7 +434,8 @@ impl CoverPicker {
                 (n, false) => format!(" · {n} by other artists or singles hidden (x shows them)"),
                 (_, true) => " · showing everything (x hides unrelated)".into(),
             };
-            Line::from(format!(" {} results{hidden} · drop an image file to use your own", self.cards.len())).fg(DIM)
+            let embed = if self.choose_only { "" } else if self.write_files { " · f: also embedding in song files (slow)" } else { " · f: embed in song files too" };
+            Line::from(format!(" {} results{hidden}{embed}", self.cards.len())).fg(DIM)
         };
         f.render_widget(status_line, status);
 
