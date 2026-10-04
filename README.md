@@ -1,35 +1,46 @@
-# rPod
+<div align="center">
+  <h1>rPod</h1>
 
-[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-ef9421)](LICENSE.md)
-[![CI](https://github.com/erbator/rPod/actions/workflows/ci.yml/badge.svg)](https://github.com/erbator/rPod/actions/workflows/ci.yml)
+  <p>A terminal iPod manager for Linux.</p>
 
-A terminal iPod manager for Linux, written in Rust. It reads and writes the iPod's own databases directly (no iTunes, no libgpod) and is built against the iPod Video 5G/5.5G.
+  <p>
+    <a href="https://github.com/erbator/rPod/actions"><img src="https://img.shields.io/github/actions/workflow/status/erbator/rPod/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status" /></a>
+    <a href="https://github.com/erbator/rPod/releases"><img src="https://img.shields.io/github/v/release/erbator/rPod?style=flat-square" alt="Latest release" /></a>
+    <a href="./LICENSE.md"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square" alt="PolyForm Noncommercial license" /></a>
+    <img src="https://img.shields.io/badge/Rust-1.85+-DEA584?logo=rust&logoColor=white&style=flat-square" alt="Rust 1.85+" />
+  </p>
 
-<img src="showcase.gif" alt="rPod browsing an iPod with album art" width="1000">
+  <p>
+    <a href="#features">Features</a> ·
+    <a href="#compatibility">Compatibility</a> ·
+    <a href="#quick-start">Quick start</a> ·
+    <a href="#keys">Keys</a> ·
+    <a href="#adding-music">Adding music</a> ·
+    <a href="#internals">Internals</a>
+  </p>
 
-## Install
+  <img src="showcase.gif" alt="rPod browsing an iPod with album art" width="800" />
+</div>
 
-Either use the install script, which puts a static binary for x86_64 or ARM64 Linux in `~/.local/bin` after checking its SHA-256 checksum (and falls back to building with cargo on other machines):
+rPod browses, edits and fills an iPod from the terminal. It reads and writes the
+iPod's own databases directly, with no iTunes or libgpod, and is built against
+the iPod Video 5G/5.5G.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/install.sh | sh
-```
+## Features
 
-or build it yourself:
-
-```bash
-git clone https://github.com/erbator/rPod && cd rPod
-cargo build --release   # → target/release/rpod
-```
-
-The script takes `RPOD_VERSION` (e.g. `v0.2.0`) and `RPOD_INSTALL_DIR`. To uninstall, run `uninstall.sh` the same way; it keeps your settings and database backups unless you pass `--purge` (`| sh -s -- --purge`).
-
-Optional: `ffmpeg` for converting formats the iPod can't play, `udisksctl` for the eject key, and Kitty, WezTerm or Ghostty for full-resolution album art. Other terminals get a half-block approximation.
+| Capability | Highlights |
+|------------|------------|
+| **Browsing** | Artists, albums, songs and playlists in drill-down columns, live filter, track details |
+| **Album art** | Full-resolution covers in Kitty, WezTerm and Ghostty; half-blocks elsewhere |
+| **Editing** | One track or a whole album at once, mixed values, auto-numbering, tags written to files too |
+| **Covers** | Search Apple's catalogue in a grid of covers, or fix every missing cover in one pass |
+| **Adding music** | Drag and drop, parallel ffmpeg conversion, duplicate and free-space checks |
+| **Safety** | Untouched data copied byte for byte, backups, atomic writes, verification after every write |
 
 ## Compatibility
 
 | Device | Browse | Add, edit, covers |
-|---|---|---|
+|--------|--------|-------------------|
 | iPod Video 5G / 5.5G | yes (tested on a 5.5G) | yes (tested on a copy of a real database) |
 | iPod Classic 6G / 6.5G / 7G | untested | no: needs the hash58 signature |
 | iPod nano 3G–4G | untested | no: needs hash58 |
@@ -37,57 +48,78 @@ Optional: `ffmpeg` for converting formats the iPod can't play, `udisksctl` for t
 | iPod 1G–4G, mini, nano 1G–2G | untested | untested |
 | iPod touch, shuffle | no | no |
 
-**Don't change anything on an iPod Classic (6G or later) yet.** Those models reject a database without a valid signature, which rPod doesn't write. The iPod would show an empty library until you restore the database from the backup. Browsing is fine.
+**Don't change anything on an iPod Classic (6G or later) yet.** Those models
+reject a database without a valid signature, which rPod doesn't write. The iPod
+would show an empty library until you restore the database from the backup.
+Browsing is fine.
 
-## Usage
+## How it works
 
-Plug in the iPod and let your desktop mount it. `rpod` finds it on its own, or you can pass the mount path (`rpod "/run/media/$USER/IPOD"`).
+Adding music scans files in parallel, converts what the iPod can't play, copies
+to the iPod one file at a time, then writes the databases.
 
-| Key | Action |
-|---|---|
-| <kbd>↑</kbd> <kbd>↓</kbd> / <kbd>j</kbd> <kbd>k</kbd> | move |
-| <kbd>←</kbd> <kbd>→</kbd> / <kbd>h</kbd> <kbd>l</kbd> / <kbd>Enter</kbd> | move between columns |
-| <kbd>1</kbd>–<kbd>4</kbd> / <kbd>Tab</kbd> | Artists, Albums, Songs, Playlists |
-| <kbd>g</kbd> <kbd>G</kbd> / <kbd>PgUp</kbd> <kbd>PgDn</kbd> | jump |
-| <kbd>/</kbd> | filter the current column |
-| <kbd>i</kbd> | edit the selected track, album, artist or playlist |
-| <kbd>space</kbd> | mark tracks to edit together |
-| <kbd>c</kbd> | find a cover for the selection |
-| <kbd>C</kbd> | fix missing covers across the iPod |
-| <kbd>a</kbd> | add music |
-| <kbd>e</kbd> | eject |
-| <kbd>q</kbd> | quit |
-
-Eject with <kbd>e</kbd> (or from your desktop) before unplugging after any change; the iPod rebuilds its menus from the new database when ejected.
-
-There's also a command line:
-
-```bash
-rpod add ~/Music/Some\ Album         # add music without the TUI
-rpod dump                            # print the database as text
-rpod cover /path/to/ipod 42 out.png  # export track 42's cover
+```mermaid
+flowchart LR
+  D["Dropped files"] --> S["Scan tags"]
+  S --> P{"Plan"}
+  P -->|playable| C["Copy"]
+  P -->|FLAC, Opus, hi-res| F["ffmpeg"]
+  F --> C
+  C --> A["Covers"]
+  A --> B["Backup"]
+  B --> W["Write + verify"]
 ```
 
-### Editing
+## Quick start
 
-<kbd>i</kbd> opens an editor for title, artist, album, album artist, genre, year, track and disc numbers, composer, comment, compilation and rating. When several tracks are selected, fields that differ show as `‹mixed›` and keep their per-track values unless you type over them. <kbd>n</kbd> numbers the tracks 1…n, <kbd>t</kbd> fills in the totals, <kbd>x</kbd> tidies whitespace. <kbd>Ctrl</kbd>+<kbd>S</kbd> saves to the iPod's database and also writes the tags into the audio files, unless you turn that off with <kbd>f</kbd>.
+Install a static binary for x86_64 or ARM64 Linux (checked against its SHA-256
+checksum; other machines build from source with cargo):
 
-### Covers
+```sh
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/install.sh | sh
+```
 
-Covers come from Apple's iTunes catalogue (up to 3000×3000) or from an image file dropped onto the window.
+Or build it yourself with Rust 1.85 or newer:
 
-<kbd>c</kbd> opens a grid of results for the selected album, best match first. <kbd>Enter</kbd> applies, <kbd>b</kbd> returns to the best match, <kbd>/</kbd> runs your own search, and <kbd>Tab</kbd> switches the store country (your system's by default).
+```sh
+git clone https://github.com/erbator/rPod && cd rPod
+cargo build --release
+```
 
-<kbd>C</kbd> searches for every album with tracks lacking art and lists each result as `confident`, `review` or `no match`. <kbd>y</kbd> accepts, <kbd>n</kbd> skips, <kbd>a</kbd> accepts all confident matches, <kbd>Enter</kbd> opens the picker for that album, and <kbd>Ctrl</kbd>+<kbd>S</kbd> writes the accepted covers in one go. Nothing is written before that.
+Plug in the iPod, let your desktop mount it, and run `rpod`. It finds the iPod
+on its own, or takes the mount path as an argument.
 
-The iPod gets its own thumbnails, and the audio files get a 1000 px JPEG embedded. Searches are paced to Apple's limit of about 20 a minute and cached for a week in `~/.cache/rpod`.
+Optional: `ffmpeg` for converting formats the iPod can't play, `udisksctl` for
+the eject key. The install script takes `RPOD_VERSION` and `RPOD_INSTALL_DIR`;
+`uninstall.sh` removes rPod and keeps settings and backups unless you pass
+`--purge`.
+
+## Keys
+
+| Category | Keys |
+|----------|------|
+| **Navigation** | `↑↓` / `jk` move, `←→` / `hl` / `Enter` columns, `1`–`4` / `Tab` views, `g` `G` jump, `/` filter |
+| **Editing** | `i` edit selection, `space` mark tracks; in the editor `n` auto-number, `t` totals, `x` tidy, `f` tags to files, `Ctrl+S` save |
+| **Covers** | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `Ctrl+S` write |
+| **Library** | `a` add music, `e` eject, `q` quit |
+
+The cover picker searches with `/`, switches store country with `Tab`, and
+accepts a dropped image file as your own cover. Always eject with `e` (or from
+your desktop) after a change; the iPod rebuilds its menus when ejected.
+
+| Command | Does |
+|---------|------|
+| `rpod add PATH...` | add music without the TUI |
+| `rpod dump` | print the database as text |
+| `rpod cover ROOT N OUT.png` | export track N's cover |
 
 ## Adding music
 
-Press <kbd>a</kbd> or drop files and folders onto the terminal window (Kitty pastes dropped paths). Files are scanned in parallel; anything the iPod can't play is converted with ffmpeg, also in parallel; then the files are copied to the iPod one at a time, because the iPod Video's hard disk slows down badly under parallel writes. Covers come from the file's tags, a `cover.jpg`/`folder.jpg` next to it, or online: in the queue, <kbd>c</kbd> picks a cover for an album and <kbd>C</kbd> finds covers for every album without one, using only the confident matches. Songs already on the iPod are skipped, free space is checked first, and multi-valued artist tags are kept whole ("Nujabes, Fat Jon").
+Press `a` or drop files and folders onto the terminal window. In the queue, `c`
+picks a cover for an album and `C` finds covers for every album without one.
 
 | Setting | Default | Choices |
-|---|---|---|
+|---------|---------|---------|
 | Lossless (FLAC, WAV, AIFF, APE, WavPack) | ALAC | AAC 320/256/192, MP3 320, MP3 V0 |
 | Unplayable lossy (Ogg, Opus, Musepack) | AAC 256 | AAC 192/128, MP3 320, MP3 V0 |
 | Shrink MP3/AAC above | off | 320/256/192 kbps |
@@ -95,66 +127,54 @@ Press <kbd>a</kbd> or drop files and folders onto the terminal window (Kitty pas
 | Skip duplicates | yes | yes/no |
 | Folder art fallback | yes | yes/no |
 
-Audio above 48 kHz or 16-bit is always converted to 16-bit/44.1 kHz, since the iPod Video can't play it. Settings are stored in `~/.config/rpod/settings.json`.
+Audio above 48 kHz or 16-bit is always converted to 16-bit/44.1 kHz, the iPod
+Video's limit. Settings live in `~/.config/rpod/settings.json`.
 
-### Backups and undo
-
-Before every write, rPod copies `iTunesDB` and `ArtworkDB` to `~/.local/share/rpod/backups/<FirewireGuid>/<unix-timestamp>/`. To undo a change, copy those two files back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
+Before every write, rPod copies `iTunesDB` and `ArtworkDB` to
+`~/.local/share/rpod/backups/<FirewireGuid>/<unix-timestamp>/`. To undo a
+change, copy them back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
 
 ## Internals
 
-rPod works on the iPod's on-disk formats directly. Writes are conservative: every chunk that doesn't need to change is copied byte for byte, the new database is written to a temp file and renamed into place, and the result is re-parsed and checked before it replaces the original. If an import fails, the audio files it copied are removed.
+| Piece | Format |
+|-------|--------|
+| **iTunesDB** | `mhbd` → `mhsd` sections for tracks (`mhit`), playlists (`mhyp`), albums (`mhia`) and artists (`mhii`) |
+| **Menus** | Master playlist `mhod` 52/53 sort indexes and jump tables, regenerated on every write |
+| **ArtworkDB** | `mhii` per track → `mhni` per thumbnail size → `.ithmb` file name |
+| **Thumbnails** | Raw RGB565 little-endian; 100×100 (1028) and 200×200 (1029) on the iPod Video |
 
-```text
-mhbd                          database header
-├─ mhsd type 1                tracks
-│  └─ mhlt → mhit …           one per track, each followed by mhod strings
-├─ mhsd type 2 / 3            playlists (3 = podcast-grouped copy)
-│  └─ mhlp → mhyp …           mhod 52/53 sort indexes + jump tables, then mhip items
-├─ mhsd type 4                album list (mhla → mhia)
-└─ mhsd type 8                artist list (mhli → mhii)
-```
+Writes copy every unchanged chunk verbatim, rename a temp file into place, and
+re-parse the result before replacing the original. Covers in the browser are
+cached per album and load only once scrolling pauses, since each one costs
+hundreds of KB of terminal escape sequences. Cover search tries up to three
+queries and scores results on title, artist, track count and year; a match by a
+clearly different artist scores low.
 
-Adding or editing tracks rewrites the affected `mhit`s and `mhip`s, links tracks to album (`mhia`) and artist (`mhii`) entries, and regenerates the master playlist's sort indexes (title, album, artist, genre, composer) and their letter jump tables, which the iPod's Music menus are built from. Edited fields also get their "sort as" records regenerated ("The Strokes" → "Strokes, The").
+Tests that need iPod data read a copy of one from `RPOD_TEST_IPOD`:
 
-```text
-mhfd
-└─ mhsd type 1 → mhli → mhii …     one image entry per track (song id = track dbid)
-                         └─ mhod 2 → mhni   one per thumbnail size
-                                     └─ mhod 3   ":F1029_1.ithmb"
-```
-
-Thumbnails are raw RGB565 little-endian pixels at an offset inside `.ithmb` files: 100×100 (format 1028) and 200×200 (format 1029) on the iPod Video. A replaced cover's old pixels stay in the `.ithmb` file as unused space.
-
-Cover art in the browser is cached per album and only loaded once scrolling pauses, because sending a cover to the terminal costs several hundred KB of escape sequences; holding a key would otherwise push that on every keypress. Opening a 1,400-track database takes a few milliseconds.
-
-Cover search tries up to three queries (main artist plus the album's core words, the album alone, the artist's discography) and scores results on title, artist, track count and year. A matching title by a clearly different artist scores low, titles in another script count as unknown rather than wrong, and a match is only "confident" if it clearly beats the runner-up.
-
-| File | Purpose |
-|---|---|
-| `bytes.rs` | bounds-checked little-endian chunk reader |
-| `itunesdb.rs`, `artworkdb.rs` | parsers |
-| `dbwrite.rs`, `artwrite.rs` | writers |
-| `store.rs` | backups and atomic writes |
-| `device.rs` | finding mounted iPods, `SysInfo`, eject |
-| `library.rs` | artist/album/song indexes |
-| `import.rs` | scan, convert, copy, commit |
-| `edit.rs`, `tags.rs` | metadata edits and file tags |
-| `itunes.rs`, `covers.rs` | cover search and applying covers |
-| `app.rs`, `ui.rs`, `importui.rs`, `editui.rs`, `coverui.rs`, `fixui.rs`, `widgets.rs` | the TUI |
-
-## Development
-
-Tests that need iPod data read it from an environment variable, so no library ends up in the repo. Point it at a copy of an iPod (a folder with `iPod_Control/{iTunes,Artwork,Device}`), never the device:
-
-```bash
+```sh
 RPOD_TEST_IPOD=/path/to/ipod-copy cargo test --release
 ```
 
 ## Acknowledgements
 
-Thanks to [DarkAaronfox](https://github.com/DarkAaronfox) for lending me his iPod Video 5.5G, which rPod was built and tested against; see also his Soulseek client [crabseek](https://github.com/DarkAaronfox/crabseek). The format work leans on the iPodLinux wiki and libgpod. [iOpenPod](https://github.com/TheRealSavi/iOpenPod) (GPLv3) was a reference for field layouts; no code was copied. The artwork URL techniques come from [Ben Dodson's iTunes Artwork Finder](https://bendodson.com/projects/itunes-artwork-finder/). Built on [ratatui](https://ratatui.rs), [ratatui-image](https://github.com/benjajaja/ratatui-image) and [lofty](https://github.com/Serial-ATA/lofty-rs).
+Thanks to [DarkAaronfox](https://github.com/DarkAaronfox) for lending me his
+iPod Video 5.5G; see also his Soulseek client
+[crabseek](https://github.com/DarkAaronfox/crabseek). Format work leans on the
+iPodLinux wiki and libgpod; [iOpenPod](https://github.com/TheRealSavi/iOpenPod)
+was a reference for field layouts (no code copied), and the artwork URL
+techniques come from
+[Ben Dodson's iTunes Artwork Finder](https://bendodson.com/projects/itunes-artwork-finder/).
+Built on [ratatui](https://ratatui.rs),
+[ratatui-image](https://github.com/benjajaja/ratatui-image) and
+[lofty](https://github.com/Serial-ATA/lofty-rs).
+
+## Star rPod
+
+If rPod keeps your iPod alive, consider
+[starring the repository](https://github.com/erbator/rPod). It helps other iPod
+owners find it.
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE.md): free to use, change and share for any noncommercial purpose.
+[PolyForm Noncommercial 1.0.0](LICENSE.md)
