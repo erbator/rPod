@@ -58,18 +58,6 @@ Browsing is fine.
 Adding music scans files in parallel, converts what the iPod can't play, copies
 to the iPod one file at a time, then writes the databases.
 
-```mermaid
-flowchart LR
-  D["Dropped files"] --> S["Scan tags"]
-  S --> P{"Plan"}
-  P -->|playable| C["Copy"]
-  P -->|FLAC, Opus, hi-res| F["ffmpeg"]
-  F --> C
-  C --> A["Covers"]
-  A --> B["Backup"]
-  B --> W["Write + verify"]
-```
-
 ## Quick start
 
 Install a static binary for x86_64 or ARM64 Linux (checked against its SHA-256
