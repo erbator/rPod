@@ -35,6 +35,7 @@ the iPod Video 5G/5.5G.
 | Editing | One track or a whole album at once, mixed values, auto-numbering, tags written to files too |
 | Covers | Search Apple's catalogue in a grid of covers, or fix every missing cover in one pass |
 | Adding music | Drag and drop, parallel ffmpeg conversion, duplicate and free-space checks |
+| Downloading | Copy songs back to your PC with proper names and tags; later syncs copy only what's new |
 | Safety | Backs up before every write and checks the result before replacing anything |
 
 ## Compatibility
@@ -94,7 +95,7 @@ the eject key. The install script takes `RPOD_VERSION` and `RPOD_INSTALL_DIR`;
 | Navigation | `↑↓` / `jk` move, `←→` / `hl` / `Enter` columns, `1`–`4` / `Tab` views, `g` `G` jump, `/` filter |
 | Editing | `i` edit selection, `space` mark tracks; in the editor `n` auto-number, `t` totals, `x` tidy, `f` tags to files, `Ctrl+S` save |
 | Covers | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `f` also embed in song files, `Ctrl+S` write |
-| Library | `a` add music, `e` eject, `q` quit |
+| Library | `a` add music, `d` download selection, `S` sync everything to PC, `e` eject, `q` quit |
 
 The cover picker hides albums by other artists and singles (`x` shows them),
 searches with `/`, switches store country with `Tab`, and
@@ -129,6 +130,26 @@ Video's limit. Settings live in `~/.config/rpod/settings.json`.
 Before every write, rPod copies `iTunesDB` and `ArtworkDB` to
 `~/.local/share/rpod/backups/<FirewireGuid>/<unix-timestamp>/`. To undo a
 change, copy them back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
+
+## Downloading to your PC
+
+`d` copies the selection (a song, album, artist, playlist or marked songs) off
+the iPod; `S` copies the whole library. Files land in `~/Music` by default
+as `Artist/Album/01 Title.mp3`; press `o` or drop a folder on the screen to
+change it, and the choice is remembered.
+
+Many songs on an iPod have no tags of their own, so every download gets the
+iPod's title, artist, album artist, album, numbers, year, genre and
+compilation flag written in: ID3v2.3 for MP3 (what Windows and older players
+read best), iTunes tags for M4A. Files without a cover get the iPod's
+thumbnail; files with their own cover keep it. Videos stay on the iPod.
+
+rPod remembers what it downloaded, per iPod and folder, in
+`~/.local/share/rpod/downloads/`. Running it again copies only new songs and
+retags or renames ones you edited on the iPod since. Nothing on the iPod is
+changed, and nothing on the PC is deleted or overwritten: a different file
+already at a song's path is left alone and reported. Stop with `Esc` and the
+next run picks up where it left off.
 
 ## Internals
 

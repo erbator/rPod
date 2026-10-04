@@ -2,6 +2,7 @@
 
 use crate::coverui::CoverPicker;
 use crate::device::Ipod;
+use crate::downloadui::DownloadView;
 use crate::editui::EditView;
 use crate::fixui::{AlbumRow, FixView};
 use crate::import;
@@ -101,6 +102,7 @@ pub struct App {
     pub edit: Option<EditView>,
     pub cover: Option<CoverPicker>,
     pub fix: Option<FixView>,
+    pub download: Option<DownloadView>,
     /// The fix-covers row the open cover picker belongs to.
     picker_for_fix: Option<usize>,
     /// The open cover picker is choosing a cover for the Add music queue.
@@ -129,6 +131,7 @@ impl App {
             edit: None,
             cover: None,
             fix: None,
+            download: None,
             picker_for_fix: None,
             picker_for_import: false,
             marked: HashSet::new(),
@@ -281,6 +284,8 @@ impl App {
             view.on_paste(text);
         } else if let Some(view) = &mut self.edit {
             view.on_paste(text);
+        } else if let Some(view) = &mut self.download {
+            view.on_paste(text);
         } else {
             self.open_import().on_paste(text);
         }
@@ -348,6 +353,21 @@ impl App {
                 (pl.name.clone(), pl.items.iter().filter_map(|id| ix.by_id.get(id).copied()).collect())
             }
         })
+    }
+
+    /// `d` downloads the selection (like `i` edits it), `S` the whole library.
+    fn open_download(&mut self, everything: bool) {
+        let (title, tracks) = if everything {
+            ("Sync all music to PC".to_string(), self.index.songs.clone())
+        } else {
+            let Some((title, tracks)) = self.edit_targets() else { return };
+            (format!("Download {title}"), tracks)
+        };
+        if tracks.is_empty() {
+            return;
+        }
+        let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();
+        self.download = Some(DownloadView::new(self.ipod.root.clone(), title, tracks));
     }
 
     fn open_editor(&mut self) {
@@ -436,6 +456,14 @@ impl App {
             }
             return changed || art;
         }
+        if let Some(view) = &mut self.download {
+            let changed = view.tick();
+            if view.closed {
+                self.download = None;
+                return true;
+            }
+            return changed || art;
+        }
         let Some(view) = &mut self.import else { return art };
         let changed = view.tick() || art;
         if let Some(library_changed) = view.closed {
@@ -503,6 +531,11 @@ impl App {
             self.tick();
             return;
         }
+        if let Some(view) = &mut self.download {
+            view.on_key(key);
+            self.tick();
+            return;
+        }
         if let Some(view) = &mut self.import {
             view.on_key(key);
             if let Some((title, tracks)) = view.wants_picker.take() {
@@ -562,6 +595,8 @@ impl App {
             }
             KeyCode::Char('i') => self.open_editor(),
             KeyCode::Char('C') => self.open_fix(),
+            KeyCode::Char('d') if !ctrl => self.open_download(false),
+            KeyCode::Char('S') => self.open_download(true),
             KeyCode::Char('c') if !ctrl && self.can_pick_cover() => {
                 if let Some((title, tracks)) = self.edit_targets() {
                     let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();

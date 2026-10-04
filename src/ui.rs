@@ -23,10 +23,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_header(f, app, header);
     if let Some(view) = &mut app.fix {
         view.draw(f, Rect { height: body.height + footer.height, ..body });
+    } else if let Some(view) = &mut app.download {
+        view.draw(f, Rect { height: body.height + footer.height, ..body });
     } else if let Some(view) = &mut app.import {
         view.draw(f, Rect { height: body.height + footer.height, ..body });
     }
-    if app.fix.is_some() || app.import.is_some() {
+    if app.fix.is_some() || app.download.is_some() || app.import.is_some() {
         if let Some(view) = &mut app.cover {
             view.draw(f, f.area());
         }
@@ -49,6 +51,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" rPod ", Style::new().bold().fg(Color::Black).bg(ACCENT)), Span::raw(" ")];
     let screen = if app.fix.is_some() {
         Some("Fix missing covers")
+    } else if app.download.is_some() {
+        Some("Download to PC")
     } else if app.import.is_some() {
         Some("Add music")
     } else {
@@ -306,11 +310,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("i", "edit"),
             ("c", "cover"),
             ("C", "fix covers"),
+            ("d", "download"),
+            ("S", "sync"),
             ("space", "mark"),
             ("a", "add music"),
             ("e", "eject"),
-            ("↑↓/jk", "move"),
-            ("←→/hl", "column"),
             ("1-4/tab", "view"),
             ("/", "filter"),
             ("q", "quit"),

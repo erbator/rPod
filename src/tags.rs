@@ -2,10 +2,12 @@
 //! later carry the same metadata the iPod shows.
 
 use crate::dbwrite::TrackEdit;
+use crate::itunesdb::Track;
 use anyhow::{Context, Result};
 use lofty::config::WriteOptions;
+use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::*;
-use lofty::tag::{Tag, items::Timestamp};
+use lofty::tag::{Tag, TagType, items::Timestamp};
 use std::path::Path;
 
 pub fn write(path: &Path, e: &TrackEdit) -> Result<()> {
@@ -15,6 +17,61 @@ pub fn write(path: &Path, e: &TrackEdit) -> Result<()> {
         file.insert_tag(Tag::new(tag_type));
     }
     let tag = file.tag_mut(tag_type).expect("tag inserted above");
+    apply(tag, e);
+    tag.save_to_path(path, WriteOptions::default())
+        .with_context(|| format!("writing tags to {}", path.display()))?;
+    Ok(())
+}
+
+/// Write everything the iPod knows about `t` into a file copied off it, in
+/// the tags PC players read best: ID3v2.3 for MP3 (Windows and older players
+/// misread v2.4), iTunes atoms for M4A. Leftover ID3v1/APE tags go, so no
+/// player shows stale values from them. `cover` (a JPEG) is only embedded
+/// when the file has no picture of its own, which is usually bigger.
+pub fn write_track(path: &Path, t: &Track, cover: Option<&[u8]>) -> Result<()> {
+    let mut file = lofty::read_from_path(path).with_context(|| format!("reading {}", path.display()))?;
+    let tag_type = file.primary_tag_type();
+    let stale: Vec<TagType> =
+        [TagType::Id3v1, TagType::Ape].into_iter().filter(|&tt| tt != tag_type && file.contains_tag_type(tt)).collect();
+    if file.tag(tag_type).is_none() {
+        file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = file.tag_mut(tag_type).expect("tag inserted above");
+    apply(tag, &full_edit(t));
+    if let Some(jpeg) = cover.filter(|_| tag.pictures().is_empty()) {
+        tag.push_picture(Picture::unchecked(jpeg.to_vec()).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
+    }
+    let options = WriteOptions::default().use_id3v23(true);
+    tag.save_to_path(path, options).with_context(|| format!("writing tags to {}", path.display()))?;
+    // `remove_from_path` opens the file read-only and fails, so hand it a writable one.
+    for tt in stale {
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        tt.remove_from(&mut f, options).with_context(|| format!("removing old tags from {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Every tag field set from `t`; empty values clear the field.
+fn full_edit(t: &Track) -> TrackEdit {
+    TrackEdit {
+        title: Some(t.title.clone()),
+        artist: Some(t.artist.clone()),
+        album: Some(t.album.clone()),
+        album_artist: Some(t.album_artist.clone()),
+        genre: Some(t.genre.clone()),
+        composer: Some(t.composer.clone()),
+        comment: Some(t.comment.clone()),
+        year: Some(t.year),
+        track_no: Some(t.track_no),
+        track_total: Some(t.track_total),
+        disc_no: Some(t.disc_no),
+        disc_total: Some(t.disc_total),
+        compilation: Some(t.compilation),
+        ..Default::default()
+    }
+}
+
+fn apply(tag: &mut Tag, e: &TrackEdit) {
 
     macro_rules! text {
         ($field:ident, $set:ident, $remove:ident) => {
@@ -65,15 +122,10 @@ pub fn write(path: &Path, e: &TrackEdit) -> Result<()> {
             tag.remove_key(ItemKey::FlagCompilation);
         }
     }
-
-    tag.save_to_path(path, WriteOptions::default())
-        .with_context(|| format!("writing tags to {}", path.display()))?;
-    Ok(())
 }
 
 /// Replace the file's front cover with a JPEG.
 pub fn embed_cover(path: &Path, jpeg: &[u8]) -> Result<()> {
-    use lofty::picture::{MimeType, Picture, PictureType};
     let mut file = lofty::read_from_path(path).with_context(|| format!("reading {}", path.display()))?;
     let tag_type = file.primary_tag_type();
     if file.tag(tag_type).is_none() {

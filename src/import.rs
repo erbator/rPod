@@ -79,6 +79,8 @@ pub struct Settings {
     /// shows covers from its own artwork database, and embedding rewrites
     /// every song file over USB (seconds per track).
     pub embed_covers: bool,
+    /// Where `d` and `S` copy songs off the iPod.
+    pub download_dir: PathBuf,
 }
 
 impl Default for Settings {
@@ -92,6 +94,7 @@ impl Default for Settings {
             folder_art: true,
             write_tags: true,
             embed_covers: false,
+            download_dir: std::env::var_os("HOME").map_or_else(|| PathBuf::from("Music"), |h| PathBuf::from(h).join("Music")),
         }
     }
 }

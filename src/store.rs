@@ -11,20 +11,29 @@ pub fn artwork_dir(root: &Path) -> PathBuf {
     root.join("iPod_Control/Artwork")
 }
 
-/// `~/.local/share/rpod/backups/<FirewireGuid>/<unix time>/`
-fn backup_dir(root: &Path) -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
+/// `~/.local/share/rpod`
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    let guid = std::fs::read_to_string(root.join("iPod_Control/Device/SysInfo"))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("rpod")
+}
+
+/// The iPod's FirewireGuid, which stays the same across mounts and renames.
+pub fn device_id(root: &Path) -> String {
+    std::fs::read_to_string(root.join("iPod_Control/Device/SysInfo"))
         .ok()
         .and_then(|s| s.lines().find_map(|l| l.strip_prefix("FirewireGuid:").map(|g| g.trim().to_string())))
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// `~/.local/share/rpod/backups/<FirewireGuid>/<unix time>/`
+fn backup_dir(root: &Path) -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    base.join("rpod/backups").join(guid).join(stamp.to_string())
+    data_dir().join("backups").join(device_id(root)).join(stamp.to_string())
 }
 
 /// Copy iTunesDB and ArtworkDB somewhere safe before changing them.
