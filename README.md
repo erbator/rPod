@@ -162,11 +162,6 @@ Built on [ratatui](https://ratatui.rs),
 [ratatui-image](https://github.com/benjajaja/ratatui-image) and
 [lofty](https://github.com/Serial-ATA/lofty-rs).
 
-## Star rPod
-
-If rPod is useful to you, a [star](https://github.com/erbator/rPod) helps other
-people with old iPods find it.
-
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE.md)
