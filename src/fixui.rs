@@ -72,7 +72,8 @@ enum Msg {
     Found(usize, Result<Option<(AlbumHit, f32, bool)>, String>),
     Preview(usize, DynamicImage),
     Progress(String),
-    Applied(Result<Report, String>),
+    /// What was written, and the rows whose cover couldn't be downloaded.
+    Applied(Result<(Report, Vec<(usize, String)>), String>),
 }
 
 pub struct FixView {
@@ -80,7 +81,11 @@ pub struct FixView {
     rows: Vec<AlbumRow>,
     table: TableState,
     picker: Picker,
-    write_files: bool,
+    /// The saved "embed covers in song files" setting; the app refreshes it
+    /// when the cover picker (which can toggle it too) closes.
+    pub write_files: bool,
+    /// Covers already written while some albums failed to download.
+    applied: Option<Report>,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
     started: Instant,
@@ -122,6 +127,7 @@ impl FixView {
             table,
             picker,
             write_files,
+            applied: None,
             rx,
             tx,
             started: Instant::now(),
@@ -167,9 +173,34 @@ impl FixView {
                         *text = s;
                     }
                 }
-                Msg::Applied(Ok(report)) => {
+                Msg::Applied(Ok((report, failed))) => {
                     self.applying = None;
-                    self.closed = Some(Some(report));
+                    let report = match self.applied.take() {
+                        Some(mut before) => {
+                            before.tracks += report.tracks;
+                            before.file_errors.extend(report.file_errors);
+                            before
+                        }
+                        None => report,
+                    };
+                    if failed.is_empty() {
+                        self.closed = Some(Some(report));
+                        continue;
+                    }
+                    // The rest were written; keep the failures on screen to retry or pick by hand.
+                    for r in self.rows.iter_mut().filter(|r| r.decision == Decision::Accept) {
+                        r.decision = Decision::Done;
+                    }
+                    for (i, e) in &failed {
+                        self.rows[*i].decision = Decision::Undecided;
+                        self.rows[*i].state = State::Failed(format!("Cover download failed: {e}"));
+                    }
+                    let written = if report.tracks > 0 { format!("Covers added to {} track(s), but ", report.tracks) } else { String::new() };
+                    self.message = Some(format!(
+                        "{written}{} album(s) failed to download (marked error): y retries, enter picks one by hand.",
+                        failed.len()
+                    ));
+                    self.applied = (report.tracks > 0).then_some(report);
                 }
                 Msg::Applied(Err(e)) => {
                     self.applying = None;
@@ -181,11 +212,12 @@ impl FixView {
     }
 
     fn apply(&mut self) {
-        let accepted: Vec<(AlbumHit, Vec<Track>)> = self
+        let accepted: Vec<(usize, AlbumHit, Vec<Track>)> = self
             .rows
             .iter()
-            .filter(|r| r.decision == Decision::Accept)
-            .filter_map(|r| Some((r.hit.clone()?, r.tracks.clone())))
+            .enumerate()
+            .filter(|(_, r)| r.decision == Decision::Accept)
+            .filter_map(|(i, r)| Some((i, r.hit.clone()?, r.tracks.clone())))
             .collect();
         if accepted.is_empty() {
             self.message = Some("Nothing accepted yet: y accepts the selected album, a accepts every confident match.".into());
@@ -194,25 +226,39 @@ impl FixView {
         let (tx, root, write_files) = (self.tx.clone(), self.root.clone(), self.write_files);
         let n = accepted.len();
         std::thread::spawn(move || {
-            let res = (|| -> anyhow::Result<Report> {
+            let res = (|| -> anyhow::Result<(Report, Vec<(usize, String)>)> {
                 // Downloads run in parallel; only the iPod writes are sequential.
                 use rayon::prelude::*;
-                let done = std::sync::atomic::AtomicUsize::new(0);
+                // Counting and sending under one lock keeps the progress text in order.
+                let done = std::sync::Mutex::new(0);
                 tx.send(Msg::Progress(format!("Downloading {n} covers…"))).ok();
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(6).build()?;
-                let jobs: Vec<Assignment> = pool.install(|| {
+                let fetched: Vec<(usize, Vec<Track>, anyhow::Result<Vec<u8>>)> = pool.install(|| {
                     accepted
                         .into_par_iter()
-                        .map(|(hit, tracks)| {
-                            let image = itunes::fetch_cover(&hit)?;
-                            let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        .map(|(i, hit, tracks)| {
+                            let image = itunes::fetch_cover(&hit);
+                            let mut d = done.lock().unwrap();
+                            *d += 1;
                             tx.send(Msg::Progress(format!("Downloaded {d}/{n} covers"))).ok();
-                            Ok(Assignment { tracks, image })
+                            (i, tracks, image)
                         })
-                        .collect::<anyhow::Result<_>>()
-                })?;
+                        .collect()
+                });
+                // One bad cover URL shouldn't sink the rest of the batch.
+                let mut jobs = Vec::new();
+                let mut failed = Vec::new();
+                for (i, tracks, image) in fetched {
+                    match image {
+                        Ok(image) => jobs.push(Assignment { tracks, image }),
+                        Err(e) => failed.push((i, format!("{e:#}"))),
+                    }
+                }
+                if jobs.is_empty() {
+                    return Ok((Report { tracks: 0, file_errors: Vec::new() }, failed));
+                }
                 tx.send(Msg::Progress("Writing to the iPod…".into())).ok();
-                covers::apply(&root, &jobs, write_files)
+                Ok((covers::apply(&root, &jobs, write_files)?, failed))
             })();
             tx.send(Msg::Applied(res.map_err(|e| format!("{e:#}")))).ok();
         });
@@ -236,7 +282,8 @@ impl FixView {
         };
         match key.code {
             KeyCode::Char('s') if ctrl => self.apply(),
-            KeyCode::Esc | KeyCode::Char('q') => self.closed = Some(None),
+            // Covers already written still need the library reloaded.
+            KeyCode::Esc | KeyCode::Char('q') => self.closed = Some(self.applied.take()),
             KeyCode::Char('y') => {
                 decide(Decision::Accept);
                 self.table.select(Some((sel + 1).min(n.saturating_sub(1))));
@@ -355,10 +402,13 @@ impl FixView {
             Line::from(""),
         ];
         match (&r.hit, &r.state) {
-            (Some(h), _) => {
+            (Some(h), state) => {
                 lines.push(Line::from(Span::styled("iTunes match", Style::new().fg(DIM))));
                 lines.push(Line::from(format!("{} — {}", h.artist, h.album)).fg(ACCENT));
                 lines.push(Line::from(format!("{} · {} tracks · match {:.0}%", h.year, h.tracks, r.score * 100.0)).fg(DIM));
+                if let State::Failed(e) = state {
+                    lines.push(Line::from(e.clone()).fg(Color::Red));
+                }
             }
             (None, State::Failed(e)) => lines.push(Line::from(e.clone()).fg(Color::Red)),
             (None, State::NoMatch) => lines.push(Line::from("No match. Press enter to search manually.").fg(Color::Yellow)),
@@ -405,6 +455,43 @@ mod tests {
     use crate::device::Ipod;
     use crate::library::Index;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn failed_downloads_stay_for_retry() {
+        // No rows at creation, so no searches start; rows are set up by hand.
+        let mut v = FixView::new(PathBuf::new(), Vec::new(), Picker::halfblocks(), false);
+        v.rows = ["A", "B", "C"].iter().map(|t| AlbumRow::new(t.to_string(), "X".into(), Vec::new())).collect();
+        v.rows[0].decision = Decision::Accept;
+        v.rows[1].decision = Decision::Accept;
+        v.rows[2].decision = Decision::Skip;
+        let report = |tracks| Report { tracks, file_errors: Vec::new() };
+
+        v.tx.send(Msg::Applied(Ok((report(10), vec![(1, "404".into())])))).unwrap();
+        v.tick();
+        assert!(v.closed.is_none(), "stays open to retry the failure");
+        assert!(v.rows[0].decision == Decision::Done && v.rows[2].decision == Decision::Skip);
+        assert!(v.rows[1].decision == Decision::Undecided && matches!(v.rows[1].state, State::Failed(_)));
+
+        // Retrying it succeeds: the screen closes reporting both batches.
+        v.rows[1].decision = Decision::Accept;
+        v.tx.send(Msg::Applied(Ok((report(4), Vec::new())))).unwrap();
+        v.tick();
+        assert_eq!(v.closed.as_ref().and_then(|r| r.as_ref()).map(|r| r.tracks), Some(14));
+    }
+
+    #[test]
+    fn leaving_reloads_only_if_covers_were_written() {
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        for (written, failed, reload) in [(3, vec![(1, "404".to_string())], Some(3)), (0, vec![(0, "404".into()), (1, "404".into())], None)] {
+            let mut v = FixView::new(PathBuf::new(), Vec::new(), Picker::halfblocks(), false);
+            v.rows = ["A", "B"].iter().map(|t| AlbumRow::new(t.to_string(), "X".into(), Vec::new())).collect();
+            v.rows.iter_mut().for_each(|r| r.decision = Decision::Accept);
+            v.tx.send(Msg::Applied(Ok((Report { tracks: written, file_errors: Vec::new() }, failed)))).unwrap();
+            v.tick();
+            v.on_key(esc);
+            assert_eq!(v.closed.as_ref().map(|r| r.as_ref().map(|r| r.tracks)), Some(reload));
+        }
+    }
 
     /// Live searches for real albums without art:
     /// `RPOD_TEST_IPOD=… cargo test -- --ignored fix_live --nocapture`

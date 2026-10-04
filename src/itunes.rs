@@ -31,13 +31,22 @@ pub struct AlbumHit {
 impl AlbumHit {
     /// 600×600 preview for the picker grid.
     pub fn preview_url(&self) -> String {
-        self.art100.replace("100x100", "600x600")
+        self.sized(600)
     }
 
     /// A 1000×1000 JPEG: enough for the iPod's thumbnails and for embedding,
     /// at a fifth of the 3000 px download.
     pub fn cover_url(&self) -> String {
-        self.art100.replace("100x100bb", "1000x1000bb")
+        self.sized(1000)
+    }
+
+    /// Apple's image server renders the size named in the URL's last segment
+    /// (`…/100x100bb.jpg`), so that segment is replaced whatever its suffix.
+    fn sized(&self, px: u32) -> String {
+        match self.art100.rsplit_once('/') {
+            Some((base, _)) => format!("{base}/{px}x{px}bb.jpg"),
+            None => self.art100.clone(),
+        }
     }
 }
 
@@ -494,6 +503,10 @@ mod tests {
             hits[0].cover_url(),
             "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/aa/bb/cc/x.jpg/1000x1000bb.jpg"
         );
+        // Other size suffixes still become the full-size cover, not the 100 px original.
+        let mut odd = hits[0].clone();
+        odd.art100 = "https://is1-ssl.mzstatic.com/image/thumb/Music/x.jpg/100x100-75.jpg".into();
+        assert_eq!(odd.cover_url(), "https://is1-ssl.mzstatic.com/image/thumb/Music/x.jpg/1000x1000bb.jpg");
     }
 
     #[test]

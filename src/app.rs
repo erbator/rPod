@@ -430,6 +430,10 @@ impl App {
             let changed = view.tick();
             if let Some(result) = view.closed.take() {
                 self.cover = None;
+                // The picker's f key may have changed the embed setting.
+                if let Some(fix) = &mut self.fix {
+                    fix.write_files = import::Settings::load().embed_covers;
+                }
                 let fix_row = self.picker_for_fix.take();
                 if std::mem::take(&mut self.picker_for_import) {
                     if let (Some(view), Some((_, image))) = (&mut self.import, result) {

@@ -434,16 +434,18 @@ impl CoverPicker {
                 (n, false) => format!(" · {n} by other artists or singles hidden (x shows them)"),
                 (_, true) => " · showing everything (x hides unrelated)".into(),
             };
-            let embed = if self.choose_only { "" } else if self.write_files { " · f: also embedding in song files (slow)" } else { " · f: embed in song files too" };
-            Line::from(format!(" {} results{hidden}{embed}", self.cards.len())).fg(DIM)
+            Line::from(format!(" {} results{hidden} · drop an image file to use your own", self.cards.len())).fg(DIM)
         };
         f.render_widget(status_line, status);
 
-        let help: &[(&str, &str)] = if self.editing_query {
-            &[("enter", "search"), ("esc", "cancel")]
+        let mut help: Vec<(&str, &str)> = if self.editing_query {
+            vec![("enter", "search"), ("esc", "cancel")]
         } else {
-            &[("←→↑↓", "choose"), ("enter", "apply"), ("b", "best"), ("x", "show all"), ("/", "search"), ("tab", "store"), ("esc", "close")]
+            vec![("←→↑↓", "choose"), ("enter", "apply"), ("b", "best"), ("x", "show all"), ("/", "search"), ("tab", "store"), ("esc", "close")]
         };
+        if !self.editing_query && !self.choose_only {
+            help.insert(help.len() - 1, ("f", if self.write_files { "embedding in files: on" } else { "embed in files" }));
+        }
         let spans: Vec<Span> = help
             .iter()
             .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
