@@ -1,7 +1,7 @@
 #!/bin/sh
 # rPod installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/install.sh | sh
 #
 # Environment:
 #   RPOD_INSTALL_DIR   where to put the binary (default: ~/.local/bin)

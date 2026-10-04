@@ -12,7 +12,7 @@ A terminal iPod manager for Linux, written in Rust. It reads and writes the iPod
 Either use the install script, which puts a static binary for x86_64 or ARM64 Linux in `~/.local/bin` after checking its SHA-256 checksum (and falls back to building with cargo on other machines):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/install.sh | sh
 ```
 
 or build it yourself:
