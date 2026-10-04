@@ -48,6 +48,18 @@ struct Response {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RawArtist {
+    artist_id: Option<u64>,
+    artist_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ArtistResponse {
+    results: Vec<RawArtist>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RawHit {
     collection_id: Option<u64>,
     collection_name: Option<String>,
@@ -102,7 +114,7 @@ fn cache_path(term: &str, country: &str, by_artist: bool) -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     term.to_lowercase().hash(&mut h);
-    let kind = if by_artist { "artist" } else { "term" };
+    let kind = if by_artist { "discography" } else { "term" };
     Some(base.join("rpod/itunes").join(format!("{country}-{kind}-{:016x}.json", h.finish())))
 }
 
@@ -125,20 +137,60 @@ fn cached(path: &Option<PathBuf>) -> Option<Vec<u8>> {
     (age < CACHE_TTL).then(|| std::fs::read(p).ok()).flatten()
 }
 
-/// One search request, answered from the cache when possible.
+fn get(url: &str, query: &[(&str, &str)]) -> Result<Vec<u8>> {
+    pace();
+    let mut req = agent().get(url);
+    for (k, v) in query {
+        req = req.query(k, v);
+    }
+    Ok(req.call().context("searching iTunes")?.body_mut().with_config().limit(5 << 20).read_to_vec()?)
+}
+
+/// Every album by the artist named `artist`. Album search misses some
+/// releases outright (e.g. Foo Fighters' "The Colour And The Shape"), but
+/// looking up the artist's id lists the whole discography.
+fn discography(artist: &str, country: &str) -> Result<Vec<u8>> {
+    let found = get(
+        "https://itunes.apple.com/search",
+        &[("term", artist), ("entity", "musicArtist"), ("country", country), ("limit", "5")],
+    )?;
+    let r: ArtistResponse = serde_json::from_slice(&found).context("unexpected iTunes response")?;
+    // A name in another script ("陳勳奇" for Frankie Chan) can't be compared,
+    // so it ranks as a borderline match. Ties keep Apple's order: two artists
+    // can share a name, and the first is the well-known one.
+    let mut best: Option<(u64, f32)> = None;
+    for a in r.results {
+        let (Some(id), Some(name)) = (a.artist_id, a.artist_name) else { continue };
+        let sim = if same_script(&name, artist) { artist_similarity(&name, artist) } else { 0.5 };
+        if sim >= 0.5 && best.is_none_or(|(_, b)| sim > b) {
+            best = Some((id, sim));
+        }
+    }
+    let Some((id, _)) = best else {
+        return Ok(br#"{"results":[]}"#.to_vec());
+    };
+    let id = id.to_string();
+    get(
+        "https://itunes.apple.com/lookup",
+        &[("id", &id), ("entity", "album"), ("country", country), ("limit", "200")],
+    )
+}
+
+/// One album search (or, with `by_artist`, an artist's discography),
+/// answered from the cache when possible.
 fn request(term: &str, country: &str, by_artist: bool) -> Result<Vec<AlbumHit>> {
     let cache = cache_path(term, country, by_artist);
     if let Some(hits) = cached(&cache).and_then(|b| parse(&b).ok()) {
         return Ok(hits);
     }
-    pace();
-    let mut req = agent()
-        .get("https://itunes.apple.com/search")
-        .query("term", term)
-        .query("entity", "album")
-        .query("country", country);
-    req = if by_artist { req.query("attribute", "artistTerm").query("limit", "50") } else { req.query("limit", "25") };
-    let bytes = req.call().context("searching iTunes")?.body_mut().with_config().limit(5 << 20).read_to_vec()?;
+    let bytes = if by_artist {
+        discography(term, country)?
+    } else {
+        get(
+            "https://itunes.apple.com/search",
+            &[("term", term), ("entity", "album"), ("country", country), ("limit", "25")],
+        )?
+    };
     let hits = parse(&bytes)?;
     if let Some(p) = cache {
         let _ = std::fs::create_dir_all(p.parent().unwrap());
@@ -172,7 +224,8 @@ impl Wanted {
     /// terms (Apple returns unrelated popular albums when too many words
     /// don't match), so they're trimmed to the main artist and the album's
     /// core words. The last resort lists the artist's whole discography,
-    /// which finds albums Apple titles differently (e.g. in another language).
+    /// which finds albums Apple titles differently (e.g. in another language)
+    /// or leaves out of album search entirely.
     fn searches(&self) -> Vec<(String, bool)> {
         let artist = primary_artist(&self.artist);
         let album = query_words(&self.album);
@@ -550,9 +603,10 @@ mod tests {
     #[ignore]
     fn itunes_live() {
         for w in [
-            want("Frankie Chan & Roel A. Garcia", "Fallen Angels (OST)", 0, 19),
+            want("A Tribe Called Quest", "The Low End Theory", 1991, 14),
             want("Nujabes / Fat Jon the Ample Soul Physician", "Samurai Champloo OST Departure", 2004, 14),
             want("My Bloody Valentine", "Loveless", 1991, 11),
+            want("Foo Fighters", "The Colour and the Shape", 1997, 13),
         ] {
             let hits = find(&w, "hu", |_| false).unwrap();
             let (i, top, confident) = best_match(&hits, &w).unwrap();
