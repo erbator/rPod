@@ -4,7 +4,7 @@ name: CI
 # broken build is caught before tagging a release.
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 jobs:

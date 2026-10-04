@@ -1,10 +1,10 @@
 #!/bin/sh
 # rPod uninstaller.
 #
-#   curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/uninstall.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/uninstall.sh | sh
 #
 # Add --purge to also delete settings and iPod database backups:
-#   curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/uninstall.sh | sh -s -- --purge
+#   curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/uninstall.sh | sh -s -- --purge
 set -eu
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }

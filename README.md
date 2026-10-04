@@ -4,7 +4,7 @@
   <p>A terminal iPod manager for Linux.</p>
 
   <p>
-    <a href="https://github.com/erbator/rPod/actions"><img src="https://img.shields.io/github/actions/workflow/status/erbator/rPod/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status" /></a>
+    <a href="https://github.com/erbator/rPod/actions"><img src="https://img.shields.io/github/actions/workflow/status/erbator/rPod/ci.yml?branch=master&style=flat-square&label=CI" alt="CI status" /></a>
     <a href="https://github.com/erbator/rPod/releases"><img src="https://img.shields.io/github/v/release/erbator/rPod?style=flat-square" alt="Latest release" /></a>
     <a href="./LICENSE.md"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square" alt="PolyForm Noncommercial license" /></a>
     <img src="https://img.shields.io/badge/Rust-1.85+-DEA584?logo=rust&logoColor=white&style=flat-square" alt="Rust 1.85+" />
@@ -69,7 +69,7 @@ Install a static binary for x86_64 or ARM64 Linux (checked against its SHA-256
 checksum; other machines build from source with cargo):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/erbator/rPod/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/erbator/rPod/master/install.sh | sh
 ```
 
 Or build it yourself with Rust 1.85 or newer:
