@@ -28,14 +28,14 @@ the iPod Video 5G/5.5G.
 
 ## Features
 
-| Capability | Highlights |
-|------------|------------|
-| **Browsing** | Artists, albums, songs and playlists in drill-down columns, live filter, track details |
-| **Album art** | Full-resolution covers in Kitty, WezTerm and Ghostty; half-blocks elsewhere |
-| **Editing** | One track or a whole album at once, mixed values, auto-numbering, tags written to files too |
-| **Covers** | Search Apple's catalogue in a grid of covers, or fix every missing cover in one pass |
-| **Adding music** | Drag and drop, parallel ffmpeg conversion, duplicate and free-space checks |
-| **Safety** | Untouched data copied byte for byte, backups, atomic writes, verification after every write |
+| Feature | What it does |
+|---------|--------------|
+| Browsing | Artists, albums, songs and playlists in drill-down columns, live filter, track details |
+| Album art | Full-resolution covers in Kitty, WezTerm and Ghostty; half-blocks elsewhere |
+| Editing | One track or a whole album at once, mixed values, auto-numbering, tags written to files too |
+| Covers | Search Apple's catalogue in a grid of covers, or fix every missing cover in one pass |
+| Adding music | Drag and drop, parallel ffmpeg conversion, duplicate and free-space checks |
+| Safety | Backs up before every write and checks the result before replacing anything |
 
 ## Compatibility
 
@@ -48,6 +48,9 @@ the iPod Video 5G/5.5G.
 | iPod 1G–4G, mini, nano 1G–2G | untested | untested |
 | iPod touch, shuffle | no | no |
 
+All of this has been tested on exactly one iPod, a borrowed Video 5.5G, so
+read every "untested" literally.
+
 **Don't change anything on an iPod Classic (6G or later) yet.** Those models
 reject a database without a valid signature, which rPod doesn't write. The iPod
 would show an empty library until you restore the database from the backup.
@@ -55,8 +58,10 @@ Browsing is fine.
 
 ## How it works
 
-Adding music scans files in parallel, converts what the iPod can't play, copies
-to the iPod one file at a time, then writes the databases.
+Files are scanned and converted with ffmpeg in parallel, but copied to the iPod
+one at a time: the iPod Video has a tiny hard disk that slows to a crawl when
+several writes compete for it. The databases are backed up and written last, and
+if that fails, the songs it copied are deleted again.
 
 ## Quick start
 
@@ -86,10 +91,10 @@ the eject key. The install script takes `RPOD_VERSION` and `RPOD_INSTALL_DIR`;
 
 | Category | Keys |
 |----------|------|
-| **Navigation** | `↑↓` / `jk` move, `←→` / `hl` / `Enter` columns, `1`–`4` / `Tab` views, `g` `G` jump, `/` filter |
-| **Editing** | `i` edit selection, `space` mark tracks; in the editor `n` auto-number, `t` totals, `x` tidy, `f` tags to files, `Ctrl+S` save |
-| **Covers** | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `Ctrl+S` write |
-| **Library** | `a` add music, `e` eject, `q` quit |
+| Navigation | `↑↓` / `jk` move, `←→` / `hl` / `Enter` columns, `1`–`4` / `Tab` views, `g` `G` jump, `/` filter |
+| Editing | `i` edit selection, `space` mark tracks; in the editor `n` auto-number, `t` totals, `x` tidy, `f` tags to files, `Ctrl+S` save |
+| Covers | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `Ctrl+S` write |
+| Library | `a` add music, `e` eject, `q` quit |
 
 The cover picker searches with `/`, switches store country with `Tab`, and
 accepts a dropped image file as your own cover. Always eject with `e` (or from
@@ -126,10 +131,10 @@ change, copy them back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
 
 | Piece | Format |
 |-------|--------|
-| **iTunesDB** | `mhbd` → `mhsd` sections for tracks (`mhit`), playlists (`mhyp`), albums (`mhia`) and artists (`mhii`) |
-| **Menus** | Master playlist `mhod` 52/53 sort indexes and jump tables, regenerated on every write |
-| **ArtworkDB** | `mhii` per track → `mhni` per thumbnail size → `.ithmb` file name |
-| **Thumbnails** | Raw RGB565 little-endian; 100×100 (1028) and 200×200 (1029) on the iPod Video |
+| iTunesDB | `mhbd` → `mhsd` sections for tracks (`mhit`), playlists (`mhyp`), albums (`mhia`) and artists (`mhii`) |
+| Menus | Master playlist `mhod` 52/53 sort indexes and jump tables, regenerated on every write |
+| ArtworkDB | `mhii` per track → `mhni` per thumbnail size → `.ithmb` file name |
+| Thumbnails | Raw RGB565 little-endian; 100×100 (1028) and 200×200 (1029) on the iPod Video |
 
 Writes copy every unchanged chunk verbatim, rename a temp file into place, and
 re-parse the result before replacing the original. Covers in the browser are
@@ -159,9 +164,8 @@ Built on [ratatui](https://ratatui.rs),
 
 ## Star rPod
 
-If rPod keeps your iPod alive, consider
-[starring the repository](https://github.com/erbator/rPod). It helps other iPod
-owners find it.
+If rPod is useful to you, a [star](https://github.com/erbator/rPod) helps other
+people with old iPods find it.
 
 ## License
 
