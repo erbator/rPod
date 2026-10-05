@@ -2,8 +2,8 @@
 //!
 //! The writer is conservative: every chunk it doesn't need to change is copied
 //! byte-for-byte from the original file, so fields rPod doesn't understand
-//! survive untouched. It appends to the track list, the master playlist, the
-//! album list (mhla) and the artist list (mhli), and regenerates the master
+//! survive untouched. It appends to or removes from the track list, the
+//! playlists, the album list (mhla) and the artist list (mhli), and regenerates the master
 //! playlist's sort indexes (mhod 52) and letter jump tables (mhod 53), which
 //! the iPod's Music menus are built from.
 
@@ -565,20 +565,27 @@ impl Linker {
 
 /// Produce a new iTunesDB with `new` appended. Assigns `meta.id` on each.
 pub fn add_tracks(orig: &[u8], existing: &ITunesDb, new: &mut [NewTrack]) -> Result<Vec<u8>> {
-    write(orig, existing, new, &HashMap::new())
+    write(orig, existing, new, &HashMap::new(), &HashSet::new())
 }
 
 /// Apply `edits` (keyed by track id) to existing tracks.
 pub fn edit_tracks(orig: &[u8], existing: &ITunesDb, edits: &HashMap<u32, TrackEdit>) -> Result<Vec<u8>> {
-    write(orig, existing, &mut [], edits)
+    write(orig, existing, &mut [], edits, &HashSet::new())
 }
 
-/// The general writer: edit existing tracks and append new ones in one pass.
+/// Remove tracks (by id) from the track list and every playlist. Album and
+/// artist entries no remaining track uses go too.
+pub fn remove_tracks(orig: &[u8], existing: &ITunesDb, remove: &HashSet<u32>) -> Result<Vec<u8>> {
+    write(orig, existing, &mut [], &HashMap::new(), remove)
+}
+
+/// The general writer: edit, remove and append tracks in one pass.
 pub fn write(
     orig: &[u8],
     existing: &ITunesDb,
     new: &mut [NewTrack],
     edits: &HashMap<u32, TrackEdit>,
+    remove: &HashSet<u32>,
 ) -> Result<Vec<u8>> {
     let mhbd = Chunk::at(orig, 0)?;
     mhbd.expect(b"mhbd")?;
@@ -618,10 +625,11 @@ pub fn write(
     }
     let links: Vec<(u32, u32)> = new.iter().map(|t| linker.link(&t.meta)).collect();
 
-    // Album/artist entries only edited tracks used, and nobody uses now, are dropped.
+    // Album/artist entries only edited or removed tracks used, and nobody uses now, are dropped.
     let final_links: Vec<(u32, u32)> = current
         .iter()
         .zip(&current_links)
+        .filter(|(t, _)| !remove.contains(&t.id))
         .map(|(t, l)| relinked.get(&t.id).copied().unwrap_or(*l))
         .chain(links.iter().copied())
         .collect();
@@ -630,7 +638,7 @@ pub fn write(
     let mut drop_albums = HashSet::new();
     let mut drop_artists = HashSet::new();
     for (t, l) in existing.tracks.iter().zip(&current_links) {
-        if relinked.contains_key(&t.id) {
+        if relinked.contains_key(&t.id) || remove.contains(&t.id) {
             if !used_albums.contains(&l.0) {
                 drop_albums.insert(l.0);
             }
@@ -640,7 +648,7 @@ pub fn write(
         }
     }
 
-    let all: Vec<&Track> = current.iter().chain(new.iter().map(|t| &t.meta)).collect();
+    let all: Vec<&Track> = current.iter().filter(|t| !remove.contains(&t.id)).chain(new.iter().map(|t| &t.meta)).collect();
 
     let mut sections = Vec::new();
     for_each_mhsd(mhbd, |sd| {
@@ -650,24 +658,29 @@ pub fn write(
                 mhlt.expect(b"mhlt")?;
                 let mut items = Vec::with_capacity(sd.end() - mhlt.off);
                 let mut mhit_len = 0x270;
+                let mut kept = 0;
                 let mut off = mhlt.off + mhlt.header_len();
                 for _ in 0..mhlt.total_len() {
                     let it = Chunk::at(orig, off)?;
                     it.expect(b"mhit")?;
                     mhit_len = it.header_len();
+                    off = it.end();
                     let id = it.u32(0x10);
+                    if remove.contains(&id) {
+                        continue;
+                    }
                     match edits.get(&id) {
                         Some(e) => items.extend(rewrite_mhit(it, e, relinked.get(&id).copied())?),
                         None => items.extend_from_slice(&orig[it.off..it.end()]),
                     }
-                    off = it.end();
+                    kept += 1;
                 }
                 for (t, (album, artist)) in new.iter().zip(&links) {
                     items.extend(mhit(t, t.meta.id, mhit_len, *album, *artist));
                 }
-                Builder::from_header(mhlt).finish_list(mhlt.total_len() + new.len(), &items)
+                Builder::from_header(mhlt).finish_list(kept + new.len(), &items)
             }
-            2 | 3 => rewrite_playlists(sd.first_child()?, new, &all)?,
+            2 | 3 => rewrite_playlists(sd.first_child()?, new, &all, remove)?,
             4 => rewrite_list(sd.first_child()?, b"mhla", &linker.new_albums, &drop_albums)?,
             8 => rewrite_list(sd.first_child()?, b"mhli", &linker.new_artists, &drop_artists)?,
             _ => orig[sd.off + sd.header_len()..sd.end()].to_vec(),
@@ -711,7 +724,7 @@ fn rewrite_list(list: Chunk, tag: &[u8; 4], extra: &[Vec<u8>], drop: &HashSet<u3
     Ok(Builder::from_header(list).finish_list(kept + extra.len(), &items))
 }
 
-fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track]) -> Result<Vec<u8>> {
+fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track], remove: &HashSet<u32>) -> Result<Vec<u8>> {
     mhlp.expect(b"mhlp")?;
     let buf = mhlp.buf;
     let mut out = Vec::new();
@@ -719,18 +732,21 @@ fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track]) -> Result<Ve
     for _ in 0..mhlp.total_len() {
         let yp = Chunk::at(buf, off)?;
         yp.expect(b"mhyp")?;
-        if yp.u8(0x14) == 0 {
+        if yp.u8(0x14) == 0 && remove.is_empty() {
             out.extend_from_slice(&buf[yp.off..yp.end()]);
         } else {
-            out.extend(rewrite_master(yp, new, all)?);
+            out.extend(rewrite_playlist(yp, new, all, remove)?);
         }
         off = yp.end();
     }
     Ok(Builder::from_header(mhlp).finish_list(mhlp.total_len(), &out))
 }
 
-fn rewrite_master(yp: Chunk, new: &[NewTrack], all: &[&Track]) -> Result<Vec<u8>> {
+/// Drop removed tracks' items from a playlist. The master playlist also gets
+/// the new tracks and fresh sort indexes.
+fn rewrite_playlist(yp: Chunk, new: &[NewTrack], all: &[&Track], remove: &HashSet<u32>) -> Result<Vec<u8>> {
     let buf = yp.buf;
+    let master = yp.u8(0x14) != 0;
     let mut kids = Vec::new();
     let mut off = yp.off + yp.header_len();
     let mut orders: HashMap<u32, Vec<(usize, String)>> = HashMap::new();
@@ -738,7 +754,7 @@ fn rewrite_master(yp: Chunk, new: &[NewTrack], all: &[&Track]) -> Result<Vec<u8>
         let od = Chunk::at(buf, off)?;
         od.expect(b"mhod")?;
         match od.u32(0x0C) {
-            ty @ (52 | 53) => {
+            ty @ (52 | 53) if master => {
                 let sort = od.u32(0x18);
                 if ![SORT_TITLE, SORT_ALBUM, SORT_ARTIST, SORT_GENRE, SORT_COMPOSER].contains(&sort) {
                     bail!("unknown library index sort type {sort}");
@@ -750,12 +766,25 @@ fn rewrite_master(yp: Chunk, new: &[NewTrack], all: &[&Track]) -> Result<Vec<u8>
         }
         off = od.end();
     }
+    let mut items = 0;
+    for _ in 0..yp.u32(0x10) {
+        let ip = Chunk::at(buf, off)?;
+        ip.expect(b"mhip")?;
+        if !remove.contains(&ip.u32(0x18)) {
+            kids.extend_from_slice(&buf[ip.off..ip.end()]);
+            items += 1;
+        }
+        off = ip.end();
+    }
     kids.extend_from_slice(&buf[off..yp.end()]);
-    for t in new {
-        kids.extend(mhip(t.meta.id));
+    if master {
+        for t in new {
+            kids.extend(mhip(t.meta.id));
+            items += 1;
+        }
     }
     let mut h = Builder::from_header(yp);
-    h.u32(0x10, yp.u32(0x10) + new.len() as u32);
+    h.u32(0x10, items);
     Ok(h.finish(&kids))
 }
 
@@ -937,6 +966,37 @@ mod tests {
         assert!(!new_ids.contains(&target));
         let re = itunesdb::parse(&out).unwrap();
         assert!(re.tracks.iter().filter(|t| edits.contains_key(&t.id)).all(|t| t.album == "Renamed Album"));
+    }
+
+    #[test]
+    fn remove_album_drops_its_tracks_items_and_entries() {
+        let Some(orig) = sample() else { return };
+        let db = itunesdb::parse(&orig).unwrap();
+        let m = mhits(&orig);
+        let album_id = |id: u32| Chunk::at(&m[&id], 0).unwrap().u32(0x120);
+        let target = album_id(db.tracks[0].id);
+        let mut remove: HashSet<u32> = db.tracks.iter().filter(|t| album_id(t.id) == target).map(|t| t.id).collect();
+        // Plus a song from a regular playlist, if there is one.
+        let listed = db.playlists.iter().position(|p| !p.is_master && !p.items.is_empty());
+        if let Some(p) = listed {
+            remove.insert(db.playlists[p].items[0]);
+        }
+        let out = remove_tracks(&orig, &db, &remove).unwrap();
+        let re = itunesdb::parse(&out).unwrap();
+
+        assert_eq!(re.tracks.len(), db.tracks.len() - remove.len());
+        assert!(re.tracks.iter().all(|t| !remove.contains(&t.id)));
+        assert!(re.playlists.iter().all(|p| p.items.iter().all(|i| !remove.contains(i))));
+        let master = re.playlists.iter().find(|p| p.is_master).unwrap();
+        assert_eq!(master.items.len(), re.tracks.len());
+        assert!(list_count(&out, 4) < list_count(&orig, 4), "the album's entry is gone");
+        if let Some(p) = listed {
+            let gone = db.playlists[p].items.iter().filter(|i| remove.contains(i)).count();
+            assert_eq!(re.playlists[p].items.len(), db.playlists[p].items.len() - gone);
+        }
+        let after = mhits(&out);
+        assert!(after.iter().all(|(id, raw)| m[id] == *raw), "kept tracks are untouched");
+        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize, out.len());
     }
 
     #[test]

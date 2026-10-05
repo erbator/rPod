@@ -369,6 +369,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(format!(" {}▏", app.cols[app.focus].filter)),
             Span::styled("   enter keep · esc clear", Style::new().fg(DIM)),
         ])
+    } else if let Some((title, tracks)) = &app.confirm_delete {
+        Line::from(vec![
+            Span::styled(" delete ", Style::new().fg(Color::Black).bg(Color::Red)),
+            Span::raw(format!(" {} song(s) from the iPod: {title}?", tracks.len())),
+            Span::styled("   y delete · any other key cancels", Style::new().fg(DIM)),
+        ])
     } else if let Some(msg) = &app.status {
         Line::from(format!(" {msg}")).fg(Color::Yellow)
     } else {
@@ -379,6 +385,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("C", "fix covers"),
             ("d", "download"),
             ("S", "sync"),
+            ("x", "delete"),
             ("space", "mark"),
             ("a", "add music"),
             ("e", "eject"),

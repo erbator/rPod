@@ -111,6 +111,8 @@ pub struct App {
     picker_for_import: bool,
     /// Tracks marked with space for batch editing.
     pub marked: HashSet<usize>,
+    /// Tracks waiting for a y/n before `x` deletes them, with a title for the prompt.
+    pub confirm_delete: Option<(String, Vec<usize>)>,
     pub status: Option<String>,
 }
 
@@ -139,6 +141,7 @@ impl App {
             picker_for_fix: None,
             picker_for_import: false,
             marked: HashSet::new(),
+            confirm_delete: None,
             status: None,
         };
         app.set_tab(Tab::Artists);
@@ -434,6 +437,37 @@ impl App {
         self.edit = Some(EditView::new(self.ipod.root.clone(), title, tracks, cover, write_files));
     }
 
+    /// `x` asks before deleting the selection. A playlist row is refused:
+    /// it would read as deleting the playlist, not its songs.
+    fn ask_delete(&mut self) {
+        if self.marked.is_empty() && matches!(self.cols[self.focus].selected(), Some(Item::Playlist(_))) {
+            self.status = Some("Open the playlist and pick songs to delete them.".into());
+            return;
+        }
+        if let Some((title, tracks)) = self.edit_targets().filter(|(_, t)| !t.is_empty()) {
+            self.confirm_delete = Some((title, tracks));
+        }
+    }
+
+    fn delete(&mut self, tracks: &[usize]) {
+        let ids: HashSet<u32> = tracks.iter().map(|&t| self.ipod.db.tracks[t].id).collect();
+        let dbids: HashSet<u64> = tracks.iter().map(|&t| self.ipod.db.tracks[t].dbid).collect();
+        if self.player.playing_dbid().is_some_and(|d| dbids.contains(&d)) {
+            self.player.stop();
+        }
+        match crate::edit::delete(&self.ipod.root, &ids) {
+            Ok(report) => {
+                self.marked.clear();
+                self.reload();
+                self.status = Some(match report.file_errors.len() {
+                    0 => format!("Deleted {} track(s).", report.tracks),
+                    n => format!("Deleted {} track(s); {n} problem(s): {}", report.tracks, report.file_errors[0]),
+                });
+            }
+            Err(e) => self.status = Some(format!("Nothing deleted: {e:#}")),
+        }
+    }
+
     /// Poll background work and the player. Returns true if a redraw is needed.
     pub fn tick(&mut self) -> bool {
         let mut playing = self.player.tick();
@@ -618,6 +652,14 @@ impl App {
         if self.filtering {
             return self.on_filter_key(key);
         }
+        if let Some((_, tracks)) = self.confirm_delete.take() {
+            if key.code == KeyCode::Char('y') {
+                self.delete(&tracks);
+            } else {
+                self.status = Some("Nothing deleted.".into());
+            }
+            return;
+        }
         if !ctrl && self.player_key(key.code) {
             return;
         }
@@ -667,6 +709,7 @@ impl App {
             KeyCode::Char('C') => self.open_fix(),
             KeyCode::Char('d') if !ctrl => self.open_download(false),
             KeyCode::Char('S') => self.open_download(true),
+            KeyCode::Char('x') | KeyCode::Delete => self.ask_delete(),
             KeyCode::Char('c') if !ctrl && self.can_pick_cover() => {
                 if let Some((title, tracks)) = self.edit_targets() {
                     let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();

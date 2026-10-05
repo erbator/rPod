@@ -244,7 +244,7 @@ pub fn replace_images(art_dir: &Path, orig: &[u8], images: &[NewImage]) -> Resul
 }
 
 /// Drop the image entries (mhii) belonging to the given tracks.
-fn remove_images(orig: &[u8], tracks: &std::collections::HashSet<u64>) -> Result<Vec<u8>> {
+pub fn remove_images(orig: &[u8], tracks: &std::collections::HashSet<u64>) -> Result<Vec<u8>> {
     let mhfd = Chunk::at(orig, 0)?;
     let mut sd = mhfd.first_child()?;
     for i in 0..mhfd.u32(0x14) {

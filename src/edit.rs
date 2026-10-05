@@ -1,11 +1,12 @@
 //! Metadata editing: the editable fields, turning form input into per-track
-//! edits, and saving them to the iPod.
+//! edits, and saving them to the iPod. Also deleting tracks from it.
 
+use crate::bytes::Chunk;
 use crate::dbwrite::{self, TrackEdit};
 use crate::itunesdb::{self, Track};
-use crate::{store, tags};
+use crate::{artwrite, store, tags};
 use anyhow::{Result, bail};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -230,6 +231,79 @@ pub fn save(root: &Path, edits: &HashMap<u32, TrackEdit>, write_files: bool) -> 
     Ok(Report { tracks: edits.len(), file_errors })
 }
 
+/// Back up, remove the tracks from the database and verify it, then drop
+/// their covers and delete their files. The files go last, so a failure
+/// before that leaves the iPod as it was.
+pub fn delete(root: &Path, ids: &HashSet<u32>) -> Result<Report> {
+    if ids.is_empty() {
+        return Ok(Report { tracks: 0, file_errors: Vec::new() });
+    }
+    store::backup(root)?;
+    let db_path = store::itunesdb_path(root);
+    let orig = std::fs::read(&db_path)?;
+    let parsed = itunesdb::parse(&orig)?;
+    let gone: Vec<&Track> = parsed.tracks.iter().filter(|t| ids.contains(&t.id)).collect();
+    let out = dbwrite::remove_tracks(&orig, &parsed, ids)?;
+
+    let check = itunesdb::parse(&out)?;
+    if check.tracks.len() + gone.len() != parsed.tracks.len()
+        || check.tracks.iter().any(|t| ids.contains(&t.id))
+        || check.playlists.iter().any(|p| p.items.iter().any(|i| ids.contains(i)))
+    {
+        bail!("verification failed: deleted tracks still listed");
+    }
+    store::atomic_write(&db_path, &out)?;
+
+    let mut file_errors = Vec::new();
+    let positions: HashSet<usize> =
+        parsed.tracks.iter().enumerate().filter(|(_, t)| ids.contains(&t.id)).map(|(i, _)| i).collect();
+    if let Err(e) = drop_play_counts(root, &positions, parsed.tracks.len()) {
+        file_errors.push(format!("Play Counts: {e:#}"));
+    }
+    // The pixels stay in the .ithmb files as unused space, as with replaced covers.
+    let art_path = store::artwork_dir(root).join("ArtworkDB");
+    if art_path.exists() {
+        let dbids: HashSet<u64> = gone.iter().map(|t| t.dbid).collect();
+        let res = std::fs::read(&art_path)
+            .map_err(anyhow::Error::from)
+            .and_then(|art| artwrite::remove_images(&art, &dbids))
+            .and_then(|art| store::atomic_write(&art_path, &art));
+        if let Err(e) = res {
+            file_errors.push(format!("ArtworkDB: {e:#}"));
+        }
+    }
+    for t in gone.iter().filter(|t| !t.location.is_empty()) {
+        match std::fs::remove_file(root.join(&t.location)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => file_errors.push(format!("{}: {e}", t.title)),
+            _ => {}
+        }
+    }
+    Ok(Report { tracks: gone.len(), file_errors })
+}
+
+/// The iPod logs plays and ratings in `Play Counts`, one entry per track in
+/// database order, until a computer merges them. Drop the deleted tracks'
+/// entries so the rest stay lined up with their songs.
+fn drop_play_counts(root: &Path, positions: &HashSet<usize>, tracks: usize) -> Result<()> {
+    let path = root.join("iPod_Control/iTunes/Play Counts");
+    let Ok(buf) = std::fs::read(&path) else { return Ok(()) };
+    let c = Chunk::at(&buf, 0)?;
+    c.expect(b"mhdp")?;
+    let (head, entry, count) = (c.header_len(), c.u32(8) as usize, c.u32(12) as usize);
+    // Already out of step with the database: not ours to guess at.
+    if count != tracks || entry == 0 || buf.len() < head + entry * count {
+        return Ok(());
+    }
+    let mut out = buf[..head].to_vec();
+    for (i, e) in buf[head..head + entry * count].chunks(entry).enumerate() {
+        if !positions.contains(&i) {
+            out.extend_from_slice(e);
+        }
+    }
+    out[12..16].copy_from_slice(&((count - positions.len()) as u32).to_le_bytes());
+    store::atomic_write(&path, &out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +345,49 @@ mod tests {
             assert_eq!((a.track_no, a.track_total), (i as u32 + 1, tracks.len() as u32));
             assert_eq!(a.title, t.title);
         }
+        assert!(root.join("data/rpod/backups").exists(), "backup made");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_files_and_play_counts() {
+        let Some(root) = scratch_root() else { return };
+        let _env = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: tests that set XDG_DATA_HOME serialize on TEST_ENV_LOCK.
+        unsafe { std::env::set_var("XDG_DATA_HOME", root.join("data")) };
+        let db = itunesdb::read(&store::itunesdb_path(&root)).unwrap();
+        let n = db.tracks.len();
+        let (a, b) = (&db.tracks[1], &db.tracks[n - 1]);
+        let file = root.join(&a.location);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"audio").unwrap();
+
+        // Play Counts: 0x60 header, 0x10-byte entries tagged with their position.
+        let mut pc = vec![0u8; 0x60];
+        pc[..4].copy_from_slice(b"mhdp");
+        pc[4..8].copy_from_slice(&0x60u32.to_le_bytes());
+        pc[8..12].copy_from_slice(&0x10u32.to_le_bytes());
+        pc[12..16].copy_from_slice(&(n as u32).to_le_bytes());
+        for i in 0..n as u32 {
+            pc.extend_from_slice(&i.to_le_bytes());
+            pc.extend_from_slice(&[0; 12]);
+        }
+        let pc_path = root.join("iPod_Control/iTunes/Play Counts");
+        std::fs::write(&pc_path, &pc).unwrap();
+
+        let report = delete(&root, &HashSet::from([a.id, b.id])).unwrap();
+        assert_eq!(report.tracks, 2);
+        assert!(report.file_errors.is_empty(), "{:?}", report.file_errors);
+        assert!(!file.exists());
+        let after = itunesdb::read(&store::itunesdb_path(&root)).unwrap();
+        assert_eq!(after.tracks.len(), n - 2);
+
+        let pc = std::fs::read(&pc_path).unwrap();
+        let firsts: Vec<u32> =
+            pc[0x60..].chunks(0x10).map(|e| u32::from_le_bytes(e[..4].try_into().unwrap())).collect();
+        let expected: Vec<u32> = (0..n as u32).filter(|&i| i != 1 && i != n as u32 - 1).collect();
+        assert_eq!(firsts, expected);
+        assert_eq!(u32::from_le_bytes(pc[12..16].try_into().unwrap()) as usize, n - 2);
         assert!(root.join("data/rpod/backups").exists(), "backup made");
         std::fs::remove_dir_all(&root).unwrap();
     }

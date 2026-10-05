@@ -33,6 +33,7 @@ the iPod Video 5G/5.5G.
 | Browsing | Artists, albums, songs and playlists in drill-down columns, live filter, track details |
 | Album art | Full-resolution covers in Kitty, WezTerm and Ghostty; half-blocks elsewhere |
 | Editing | One track or a whole album at once, mixed values, auto-numbering, tags written to files too |
+| Deleting | A song, album, artist or marked songs, from the database, playlists and disk |
 | Covers | Search Apple's catalogue in a grid of covers, or fix every missing cover in one pass |
 | Adding music | Drag and drop, parallel ffmpeg conversion, duplicate and free-space checks |
 | Downloading | Copy songs back to your PC with proper names and tags; later syncs copy only what's new |
@@ -99,7 +100,7 @@ the eject key. The install script takes `RPOD_VERSION` and `RPOD_INSTALL_DIR`;
 | Editing | `i` edit selection, `space` mark tracks; in the editor `n` auto-number, `t` totals, `x` tidy, `f` tags to files, `Ctrl+S` save |
 | Covers | `c` pick a cover, `C` fix missing covers; `y` / `n` / `a` accept, skip, accept confident, `f` also embed in song files, `Ctrl+S` write |
 | Playing | `Enter` on a song plays from there, `p` pause, `<` `>` previous/next, `[` `]` seek 10 s, `-` `+` volume, `z` shuffle, `r` repeat |
-| Library | `a` add music, `d` download selection, `S` sync everything to PC, `e` eject, `q` quit |
+| Library | `a` add music, `d` download selection, `x` delete selection, `S` sync everything to PC, `e` eject, `q` quit |
 
 The cover picker hides albums by other artists and singles (`x` shows them),
 searches with `/`, switches store country with `Tab`, and
@@ -143,6 +144,15 @@ and the player keys, which also work on the Add music, download and
 fix-covers screens. Sound goes through ALSA, so PipeWire and PulseAudio work
 as usual. Volume is remembered; ejecting stops playback first so the iPod can
 unmount.
+
+## Deleting
+
+`x` (or `Delete`) deletes the selection from the iPod: a song, an album, an
+artist or the marked songs, after a `y` to confirm. To delete songs in a
+playlist, open it and pick them; the playlist row itself is refused. The
+databases are backed up and the new iTunesDB is checked before any song file
+is deleted. The backup only restores the database: deleted song files are
+gone for good.
 
 ## Downloading to your PC
 
