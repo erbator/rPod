@@ -2,7 +2,7 @@
 
 use crate::edit::{self, FIELDS, Field, Form, Kind, Report};
 use crate::itunesdb::Track;
-use crate::widgets::Input;
+use crate::widgets::{self, Input};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -348,11 +348,7 @@ impl EditView {
         } else {
             &[("↑↓", "field"), ("enter", "edit"), ("←→", "stars/toggle"), ("u", "revert"), ("ctrl+s", "save"), ("esc", "cancel")]
         };
-        let help: Vec<Span> = key_help
-            .iter()
-            .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
-            .collect();
-        f.render_widget(Line::from(help), keys);
+        f.render_widget(widgets::key_hints(key_help), keys);
     }
 }
 

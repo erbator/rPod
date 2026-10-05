@@ -5,6 +5,7 @@ use crate::covers::{self, Assignment};
 use crate::edit::Report;
 use crate::itunes::{self, AlbumHit};
 use crate::itunesdb::Track;
+use crate::widgets;
 use image::DynamicImage;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -373,11 +374,7 @@ impl FixView {
                 ("f", if self.write_files { "embedding in files: on" } else { "embed in files" }),
                 ("esc", "back"),
             ];
-            Line::from(
-                keys.iter()
-                    .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
-                    .collect::<Vec<_>>(),
-            )
+            widgets::key_hints(&keys)
         };
         f.render_widget(line, footer);
     }

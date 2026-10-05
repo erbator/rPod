@@ -5,7 +5,7 @@ use crate::covers::{self, Assignment};
 use crate::edit::Report;
 use crate::itunes::{self, AlbumHit, Wanted};
 use crate::itunesdb::Track;
-use crate::widgets::Input;
+use crate::widgets::{self, Input};
 use image::DynamicImage;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -446,11 +446,7 @@ impl CoverPicker {
         if !self.editing_query && !self.choose_only {
             help.insert(help.len() - 1, ("f", if self.write_files { "embedding in files: on" } else { "embed in files" }));
         }
-        let spans: Vec<Span> = help
-            .iter()
-            .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
-            .collect();
-        f.render_widget(Line::from(spans), keys);
+        f.render_widget(widgets::key_hints(&help), keys);
     }
 
     fn draw_card(&mut self, f: &mut Frame, rect: Rect, i: usize, is_best: bool) {

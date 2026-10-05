@@ -59,7 +59,8 @@ pub fn is_video(t: &Track) -> bool {
     matches!(ext.as_str(), "m4v" | "mov") || (t.media_type & 0x02 != 0 && t.media_type & 0x01 == 0)
 }
 
-/// `Artist/Album/01 Title.ext`, with `1-01` style numbers on multi-disc albums.
+/// `Artist/Album/01 Title.ext`, with `1-01` style numbers on multi-disc
+/// albums. Compilations go under `Compilations/Album`, as iTunes files them.
 pub fn target_path(t: &Track) -> PathBuf {
     let or = |s: &str, fallback: &str| if s.trim().is_empty() { fallback.to_string() } else { s.to_string() };
     let num = match (t.disc_no, t.track_no) {
@@ -68,7 +69,8 @@ pub fn target_path(t: &Track) -> PathBuf {
         (_, n) => format!("{n:02} "),
     };
     let ext = Path::new(&t.location).extension().and_then(|e| e.to_str()).unwrap_or("mp3").to_lowercase();
-    PathBuf::from(clean_name(t.sort_artist()))
+    let artist = if t.compilation { "Compilations" } else { t.sort_artist() };
+    PathBuf::from(clean_name(artist))
         .join(clean_name(&or(&t.album, "Unknown Album")))
         .join(format!("{}.{ext}", clean_name(&format!("{num}{}", or(&t.title, "Unknown")))))
 }
@@ -158,6 +160,8 @@ pub fn plan(root: &Path, dest: &Path, tracks: &[Track]) -> Vec<Planned> {
     for (i, t) in tracks.iter().enumerate() {
         let Some(e) = record.files.get(&t.dbid).filter(|e| dest.join(&e.path).is_file()) else { continue };
         let rel = target_path(t);
+        // Past 99 same-named songs a recorded file counts as moved and gets
+        // renamed; raise the bound if that ever matters.
         let same_place = e.path == rel || (1..100).any(|n| e.path == numbered(&rel, n));
         if same_place {
             taken.insert(e.path.clone());
@@ -269,36 +273,59 @@ fn copy_one(root: &Path, dest: &Path, p: &Planned, cover: Option<&[u8]>) -> Resu
     let to = dest.join(&p.rel);
     let dir = to.parent().unwrap();
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let ext = p.rel.extension().unwrap_or_default().to_string_lossy();
-    let tmp = dir.join(format!(".rpod-{:016x}.{ext}", p.track.dbid));
+    let tmp = temp_path(&to, p.track.dbid);
     if let Err(e) = std::fs::copy(&src, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("copying {}", src.display()));
     }
     // A song is worth keeping even if its tags can't be written.
     let warning = tags::write_track(&tmp, &p.track, cover).err().map(|e| format!("copied, but tags failed: {e:#}"));
-    std::fs::rename(&tmp, &to).with_context(|| format!("saving {}", to.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &to) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("saving {}", to.display()));
+    }
     Ok(warning)
 }
 
+/// Retag a song already on the PC, and move it if its name changed. The new
+/// version is built in a temp copy and swapped in, so an interrupted update
+/// leaves the old file as it was.
 fn update_one(dest: &Path, p: &Planned, cover: Option<&[u8]>) -> Result<Option<String>> {
     let from = dest.join(p.from.as_ref().unwrap_or(&p.rel));
     let to = dest.join(&p.rel);
-    if from != to {
-        if to.exists() {
-            bail!("{} already exists", to.display());
-        }
-        std::fs::create_dir_all(to.parent().unwrap())?;
-        std::fs::rename(&from, &to).with_context(|| format!("renaming to {}", to.display()))?;
-        // Tidy the old album/artist folders if that emptied them.
-        for dir in from.ancestors().skip(1).take(2) {
-            if dir == dest || std::fs::remove_dir(dir).is_err() {
-                break;
-            }
+    if from != to && to.exists() {
+        bail!("{} already exists", to.display());
+    }
+    let dir = to.parent().unwrap();
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = temp_path(&to, p.track.dbid);
+    let res = std::fs::copy(&from, &tmp)
+        .with_context(|| format!("copying {}", from.display()))
+        .and_then(|_| tags::write_track(&tmp, &p.track, cover))
+        .and_then(|()| std::fs::rename(&tmp, &to).with_context(|| format!("saving {}", to.display())));
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if from == to {
+        return Ok(None);
+    }
+    if let Err(e) = std::fs::remove_file(&from) {
+        return Ok(Some(format!("moved, but the old copy at {} stayed: {e}", from.display())));
+    }
+    // Tidy the old album/artist folders if that emptied them.
+    for dir in from.ancestors().skip(1).take(2) {
+        if dir == dest || std::fs::remove_dir(dir).is_err() {
+            break;
         }
     }
-    tags::write_track(&to, &p.track, cover)?;
     Ok(None)
+}
+
+/// A hidden file next to `to`, where its new version is built.
+fn temp_path(to: &Path, dbid: u64) -> PathBuf {
+    let ext = to.extension().unwrap_or_default().to_string_lossy();
+    to.with_file_name(format!(".rpod-{dbid:016x}.{ext}"))
 }
 
 #[cfg(test)]
@@ -320,6 +347,15 @@ mod tests {
     }
 
     #[test]
+    fn spots_videos() {
+        let t = |location: &str, media_type: u32| Track { location: location.into(), media_type, ..Default::default() };
+        assert!(is_video(&t("iPod_Control/Music/F01/ABCD.m4v", 0)));
+        assert!(is_video(&t("iPod_Control/Music/F01/ABCD.mp4", 0x02)), "movie without audio flag");
+        assert!(!is_video(&t("iPod_Control/Music/F01/ABCD.m4a", 0x01)));
+        assert!(!is_video(&t("iPod_Control/Music/F01/ABCD.mp3", 0)));
+    }
+
+    #[test]
     fn names_are_readable_and_safe() {
         let t = track("AC/DC", "Back in Black", "Hells Bells", (1, 1), 1);
         assert_eq!(target_path(&t), PathBuf::from("AC_DC/Back in Black/01 Hells Bells.mp3"));
@@ -327,6 +363,9 @@ mod tests {
         assert_eq!(target_path(&t), PathBuf::from("Panchiko/D_E_A_T_H_M_E_T_A_L/2-07 Stabilisers.mp3"));
         let t = track("", "", "", (0, 0), 0);
         assert_eq!(target_path(&t), PathBuf::from("Unknown Artist/Unknown Album/Unknown.mp3"));
+        let mut t = track("Nas", "Wild Style OST", "Intro", (1, 1), 1);
+        (t.album_artist, t.compilation) = ("Various Artists".into(), true);
+        assert_eq!(target_path(&t), PathBuf::from("Compilations/Wild Style OST/01 Intro.mp3"));
         assert_eq!(clean_name(".hidden..."), "_hidden");
         assert_eq!(clean_name("con"), "con_");
     }
@@ -338,8 +377,7 @@ mod tests {
         let (root, dest) = (tmp.join("ipod"), tmp.join("music"));
         unsafe { std::env::set_var("XDG_DATA_HOME", tmp.join("data")) };
         let a = track("A", "X", "One", (1, 1), 1);
-        let b = track("A", "X", "One", (1, 1), 1); // same name, different song
-        let mut b = b;
+        let mut b = track("A", "X", "One", (1, 1), 1); // same name, different song
         b.dbid += 1;
         let c = track("A", "X", "Two", (1, 1), 2);
 
@@ -369,6 +407,33 @@ mod tests {
         let p = plan(&root, &dest, &[b2]);
         assert_eq!((p[0].step, p[0].rel.clone()), (Step::Update, PathBuf::from("A/X/01 Three.mp3")));
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// Needs ffmpeg to make a sample file; skipped without it.
+    #[test]
+    fn update_moves_and_retags() {
+        let dest = std::env::temp_dir().join(format!("rpod-update-{}", std::process::id()));
+        let old = PathBuf::from("A/X/01 One.mp3");
+        std::fs::create_dir_all(dest.join("A/X")).unwrap();
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "libmp3lame"])
+            .arg(dest.join(&old))
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        let t = track("A", "Y", "Three", (1, 1), 1);
+        let p = Planned { rel: target_path(&t), track: t, step: Step::Update, from: Some(old.clone()) };
+        assert_eq!(update_one(&dest, &p, None).unwrap(), None);
+
+        let file = lofty::read_from_path(dest.join("A/Y/01 Three.mp3")).unwrap();
+        use lofty::prelude::*;
+        assert_eq!(file.primary_tag().unwrap().title().as_deref(), Some("Three"));
+        assert!(!dest.join(&old).exists() && !dest.join("A/X").exists(), "old file and its emptied folder are gone");
+        let names: Vec<_> = std::fs::read_dir(dest.join("A/Y")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["01 Three.mp3"], "no temp file left behind");
+        std::fs::remove_dir_all(&dest).unwrap();
     }
 
     /// Downloads the first N songs of a real iPod (read-only on the iPod),

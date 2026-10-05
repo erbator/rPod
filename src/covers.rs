@@ -96,10 +96,7 @@ pub fn apply(root: &Path, jobs: &[Assignment], write_files: bool) -> Result<Repo
 
 /// Flip and save the "embed covers in song files" setting.
 pub fn toggle_embed_covers() -> bool {
-    let mut s = crate::import::Settings::load();
-    s.embed_covers = !s.embed_covers;
-    s.save();
-    s.embed_covers
+    crate::import::Settings::update(|s| s.embed_covers = !s.embed_covers).embed_covers
 }
 
 #[cfg(test)]

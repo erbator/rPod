@@ -164,18 +164,7 @@ fn discography(artist: &str, country: &str) -> Result<Vec<u8>> {
         &[("term", artist), ("entity", "musicArtist"), ("country", country), ("limit", "5")],
     )?;
     let r: ArtistResponse = serde_json::from_slice(&found).context("unexpected iTunes response")?;
-    // A name in another script ("陳勳奇" for Frankie Chan) can't be compared,
-    // so it ranks as a borderline match. Ties keep Apple's order: two artists
-    // can share a name, and the first is the well-known one.
-    let mut best: Option<(u64, f32)> = None;
-    for a in r.results {
-        let (Some(id), Some(name)) = (a.artist_id, a.artist_name) else { continue };
-        let sim = if same_script(&name, artist) { artist_similarity(&name, artist) } else { 0.5 };
-        if sim >= 0.5 && best.is_none_or(|(_, b)| sim > b) {
-            best = Some((id, sim));
-        }
-    }
-    let Some((id, _)) = best else {
+    let Some(id) = pick_artist(r.results, artist) else {
         return Ok(br#"{"results":[]}"#.to_vec());
     };
     let id = id.to_string();
@@ -183,6 +172,22 @@ fn discography(artist: &str, country: &str) -> Result<Vec<u8>> {
         "https://itunes.apple.com/lookup",
         &[("id", &id), ("entity", "album"), ("country", country), ("limit", "200")],
     )
+}
+
+/// The ID of the search result that is `artist`. A name in another script
+/// ("陳勳奇" for Frankie Chan) can't be compared, so it ranks as a borderline
+/// match. Ties keep Apple's order: two artists can share a name, and the
+/// first is the well-known one.
+fn pick_artist(results: Vec<RawArtist>, artist: &str) -> Option<u64> {
+    let mut best: Option<(u64, f32)> = None;
+    for a in results {
+        let (Some(id), Some(name)) = (a.artist_id, a.artist_name) else { continue };
+        let sim = if same_script(&name, artist) { artist_similarity(&name, artist) } else { 0.5 };
+        if sim >= 0.5 && best.is_none_or(|(_, b)| sim > b) {
+            best = Some((id, sim));
+        }
+    }
+    best.map(|(id, _)| id)
 }
 
 /// One album search (or, with `by_artist`, an artist's discography),
@@ -473,6 +478,19 @@ pub fn best_match(hits: &[AlbumHit], w: &Wanted) -> Option<(usize, f32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_named_artist() {
+        let found = |names: &[&str]| -> Vec<RawArtist> {
+            let json: Vec<String> =
+                names.iter().enumerate().map(|(i, n)| format!(r#"{{"artistId":{i},"artistName":"{n}"}}"#)).collect();
+            serde_json::from_str::<ArtistResponse>(&format!(r#"{{"results":[{}]}}"#, json.join(","))).unwrap().results
+        };
+        assert_eq!(pick_artist(found(&["Foo Fighters Tribute Band", "Foo Fighters"]), "Foo Fighters"), Some(1));
+        assert_eq!(pick_artist(found(&["Nirvana", "Nirvana"]), "Nirvana"), Some(0), "ties keep Apple's order");
+        assert_eq!(pick_artist(found(&["陳勳奇"]), "Frankie Chan"), Some(0), "other scripts are borderline");
+        assert_eq!(pick_artist(found(&["Metallica"]), "A Tribe Called Quest"), None);
+    }
 
     const SAMPLE: &str = r#"{"resultCount":2,"results":[
       {"wrapperType":"collection","collectionType":"Album","collectionId":1,"artistName":"Weezer",

@@ -364,11 +364,15 @@ impl App {
     fn play_selected(&mut self) {
         let col = &self.cols[self.focus];
         let Some(Item::Track(sel)) = col.selected() else { return };
+        if crate::export::is_video(&self.ipod.db.tracks[sel]) {
+            self.status = Some("Videos don't play in rPod.".into());
+            return;
+        }
         let songs: Vec<usize> = col
             .items
             .iter()
             .filter_map(|it| match it {
-                Item::Track(t) if *t == sel || !crate::export::is_video(&self.ipod.db.tracks[*t]) => Some(*t),
+                Item::Track(t) if !crate::export::is_video(&self.ipod.db.tracks[*t]) => Some(*t),
                 _ => None,
             })
             .collect();
@@ -377,11 +381,27 @@ impl App {
         self.player.play(queue, start);
     }
 
+    /// Handle `code` if it's one of the player's keys.
+    fn player_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char('p') => self.player.toggle_pause(),
+            KeyCode::Char('>') => self.player.next(),
+            KeyCode::Char('<') => self.player.prev(),
+            KeyCode::Char(']') => self.player.seek(10),
+            KeyCode::Char('[') => self.player.seek(-10),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(5),
+            KeyCode::Char('-') => self.change_volume(-5),
+            KeyCode::Char('z') => self.player.toggle_shuffle(),
+            KeyCode::Char('r') => self.player.cycle_repeat(),
+            _ => return false,
+        }
+        true
+    }
+
     fn change_volume(&mut self, delta: i8) {
         self.player.change_volume(delta);
-        let mut settings = import::Settings::load();
-        settings.volume = self.player.volume;
-        settings.save();
+        let volume = self.player.volume;
+        import::Settings::update(|s| s.volume = volume);
     }
 
     /// `d` downloads the selection (like `i` edits it), `S` the whole library.
@@ -396,7 +416,7 @@ impl App {
             return;
         }
         let tracks = tracks.iter().map(|&t| self.ipod.db.tracks[t].clone()).collect();
-        self.download = Some(DownloadView::new(self.ipod.root.clone(), title, tracks));
+        self.download = Some(DownloadView::new(self.ipod.root.clone(), title, everything, tracks));
     }
 
     fn open_editor(&mut self) {
@@ -466,10 +486,8 @@ impl App {
             if let Some(result) = view.closed.take() {
                 let write_files = view.write_files;
                 self.edit = None;
-                let mut settings = import::Settings::load();
-                if settings.write_tags != write_files {
-                    settings.write_tags = write_files;
-                    settings.save();
+                if import::Settings::load().write_tags != write_files {
+                    import::Settings::update(|s| s.write_tags = write_files);
                 }
                 if let Some(report) = result {
                     self.marked.clear();
@@ -562,6 +580,13 @@ impl App {
             self.tick();
             return;
         }
+        // Full screens leave the player's keys free, except while typing.
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let typing = self.download.as_ref().is_some_and(|v| v.typing()) || self.import.as_ref().is_some_and(|v| v.typing());
+        let full_screen = self.fix.is_some() || self.download.is_some() || self.import.is_some();
+        if full_screen && !typing && !ctrl && self.player_key(key.code) {
+            return;
+        }
         if let Some(view) = &mut self.fix {
             view.on_key(key);
             if let Some(row) = view.wants_picker.take() {
@@ -593,7 +618,9 @@ impl App {
         if self.filtering {
             return self.on_filter_key(key);
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if !ctrl && self.player_key(key.code) {
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
@@ -618,15 +645,6 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.move_by(isize::MIN / 2),
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX / 2),
             KeyCode::Enter if matches!(self.cols[self.focus].selected(), Some(Item::Track(_))) => self.play_selected(),
-            KeyCode::Char('p') => self.player.toggle_pause(),
-            KeyCode::Char('>') => self.player.next(),
-            KeyCode::Char('<') => self.player.prev(),
-            KeyCode::Char(']') => self.player.seek(10),
-            KeyCode::Char('[') => self.player.seek(-10),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(5),
-            KeyCode::Char('-') => self.change_volume(-5),
-            KeyCode::Char('z') => self.player.toggle_shuffle(),
-            KeyCode::Char('r') => self.player.cycle_repeat(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
                 if self.focus + 1 < self.cols.len() {
                     self.focus += 1;

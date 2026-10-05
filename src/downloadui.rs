@@ -4,6 +4,7 @@
 use crate::export::{self, Planned, Progress, Step, Summary};
 use crate::import::{self, Settings};
 use crate::itunesdb::Track;
+use crate::widgets::{self, Input, size};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -45,6 +46,8 @@ struct Run {
 pub struct DownloadView {
     root: PathBuf,
     title: String,
+    /// `S`: the whole library, worded as a sync.
+    sync: bool,
     tracks: Vec<Track>,
     videos: usize,
     dest: PathBuf,
@@ -56,7 +59,7 @@ pub struct DownloadView {
     /// away stops following; scrolling back onto it resumes.
     working: Option<usize>,
     follow: bool,
-    path_input: Option<String>,
+    path_input: Option<Input>,
     message: Option<String>,
     run: Option<Run>,
     /// Set when the user leaves the screen.
@@ -64,11 +67,12 @@ pub struct DownloadView {
 }
 
 impl DownloadView {
-    pub fn new(root: PathBuf, title: String, tracks: Vec<Track>) -> Self {
+    pub fn new(root: PathBuf, title: String, sync: bool, tracks: Vec<Track>) -> Self {
         let (tracks, videos): (Vec<Track>, Vec<Track>) = tracks.into_iter().partition(|t| !export::is_video(t));
         let mut view = Self {
             root,
             title,
+            sync,
             tracks,
             videos: videos.len(),
             dest: Settings::load().download_dir,
@@ -95,14 +99,10 @@ impl DownloadView {
     }
 
     fn set_dest(&mut self, text: &str) {
-        let text = text.trim();
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return;
         }
-        let path = match text.strip_prefix("~/") {
-            Some(rest) => std::env::var_os("HOME").map_or_else(|| PathBuf::from(text), |h| PathBuf::from(h).join(rest)),
-            None => PathBuf::from(text),
-        };
+        let path = widgets::expand_home(text);
         if !path.is_absolute() {
             self.message = Some("Use a full path, like ~/Music or /mnt/usb/Music.".into());
             return;
@@ -111,9 +111,7 @@ impl DownloadView {
             self.message = Some("That's a file; pick a folder.".into());
             return;
         }
-        let mut settings = Settings::load();
-        settings.download_dir = path.clone();
-        settings.save();
+        Settings::update(|s| s.download_dir = path.clone());
         self.dest = path;
         self.replan();
         self.message = Some(format!("Downloading to {}.", tilde(&self.dest)));
@@ -121,13 +119,18 @@ impl DownloadView {
 
     pub fn on_paste(&mut self, text: &str) {
         if let Some(input) = &mut self.path_input {
-            input.push_str(text.trim());
+            input.insert(text.trim());
         } else if self.run.is_none() {
             match import::parse_dropped(text).into_iter().find(|p| p.is_dir()) {
                 Some(dir) => self.set_dest(&dir.to_string_lossy()),
                 None => self.message = Some("Drop a folder here to download into it.".into()),
             }
         }
+    }
+
+    /// Whether the folder field is open, so typed keys belong to it.
+    pub fn typing(&self) -> bool {
+        self.path_input.is_some()
     }
 
     fn count(&self, step: Step) -> usize {
@@ -145,8 +148,13 @@ impl DownloadView {
             return;
         }
         let needed = self.copy_bytes();
-        if free_space(&self.dest).is_some_and(|free| needed > free) {
-            self.message = Some(format!("Not enough free space in {}.", tilde(&self.dest)));
+        if let Some(free) = free_space(&self.dest).filter(|&free| needed > free) {
+            self.message =
+                Some(format!("Not enough free space in {}: {} more needed.", tilde(&self.dest), size(needed - free)));
+            return;
+        }
+        if let Err(e) = check_writable(&self.dest) {
+            self.message = Some(format!("Can't write to {}: {e}", tilde(&self.dest)));
             return;
         }
         let (tx, rx) = channel();
@@ -204,16 +212,14 @@ impl DownloadView {
         if let Some(input) = &mut self.path_input {
             match key.code {
                 KeyCode::Enter => {
-                    let text = std::mem::take(input);
+                    let text = input.text();
                     self.path_input = None;
                     self.set_dest(&text);
                 }
                 KeyCode::Esc => self.path_input = None,
-                KeyCode::Backspace => {
-                    input.pop();
+                _ => {
+                    input.key(key);
                 }
-                KeyCode::Char(c) => input.push(c),
-                _ => {}
             }
             return;
         }
@@ -231,7 +237,7 @@ impl DownloadView {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.closed = true,
             KeyCode::Enter | KeyCode::Char('s') => self.start(),
-            KeyCode::Char('o') => self.path_input = Some(tilde(&self.dest)),
+            KeyCode::Char('o') => self.path_input = Some(Input::new(&tilde(&self.dest))),
             _ => self.scroll(key),
         }
     }
@@ -272,12 +278,16 @@ impl DownloadView {
         let bytes = self.copy_bytes();
         let (copy, update, have, taken) =
             (self.count(Step::Copy), self.count(Step::Update), self.count(Step::Have), self.count(Step::Taken));
-        let mut counts = vec![
-            Span::styled(format!(" {copy} "), Style::new().bold().fg(Color::White)),
-            Span::raw("to copy  "),
-            Span::styled(format!("{update} to update  "), Style::new().fg(Color::Yellow)),
-            Span::styled(format!("{have} already on PC"), Style::new().fg(DIM)),
-        ];
+        let mut counts = if self.sync && update + have == 0 {
+            vec![Span::styled(format!(" Download all {copy} songs"), Style::new().bold().fg(Color::White))]
+        } else {
+            vec![
+                Span::styled(format!(" {copy} "), Style::new().bold().fg(Color::White)),
+                Span::raw(if self.sync { "new songs  " } else { "to copy  " }),
+                Span::styled(format!("{update} to update  "), Style::new().fg(Color::Yellow)),
+                Span::styled(format!("{have} already on PC"), Style::new().fg(DIM)),
+            ]
+        };
         if taken > 0 {
             counts.push(Span::styled(format!("  {taken} skipped (another file in the way)"), Style::new().fg(Color::Red)));
         }
@@ -336,7 +346,12 @@ impl DownloadView {
             }
             Some(Ok(s)) => {
                 let verb = if s.cancelled { "Stopped" } else { "Done" };
-                lines.push(Line::from(format!(" {verb}: copied {}, updated {}, {} failed.", s.copied, s.updated, s.failed)).bold());
+                let mut text = format!(" {verb}: copied {}, updated {}, {} failed", s.copied, s.updated, s.failed);
+                let taken = self.count(Step::Taken);
+                if taken > 0 {
+                    text += &format!(", {taken} skipped (another file in the way)");
+                }
+                lines.push(Line::from(text + ".").bold());
                 lines.push(Line::from(" Press Enter to go back.").fg(ACCENT));
             }
             Some(Err(e)) => {
@@ -367,7 +382,7 @@ impl DownloadView {
                 let (label, color) = match (state, p.step) {
                     (State::Working, _) => ("copying", ACCENT),
                     (State::Done, _) => ("✓ done", Color::Green),
-                    (State::Warned(_), _) => ("✓ no tags", Color::Yellow),
+                    (State::Warned(_), _) => ("✓ warning", Color::Yellow),
                     (State::Failed(_), _) => ("✗ failed", Color::Red),
                     (State::Waiting, Step::Copy) => ("copy", Color::White),
                     (State::Waiting, Step::Update) => ("update", Color::Yellow),
@@ -388,11 +403,10 @@ impl DownloadView {
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let line = if let Some(input) = &self.path_input {
-            Line::from(vec![
-                Span::styled(" folder ", Style::new().fg(Color::Black).bg(Color::Yellow)),
-                Span::raw(format!(" {input}▏")),
-                Span::styled("   enter set · esc cancel", Style::new().fg(DIM)),
-            ])
+            let mut spans = vec![Span::styled(" folder ", Style::new().fg(Color::Black).bg(Color::Yellow)), Span::raw(" ")];
+            spans.extend(input.spans());
+            spans.push(Span::styled("   enter set · esc cancel", Style::new().fg(DIM)));
+            Line::from(spans)
         } else if let Some(msg) = &self.message {
             Line::from(format!(" {msg}")).fg(Color::Yellow)
         } else {
@@ -401,14 +415,19 @@ impl DownloadView {
                 Some(_) => &[("enter", "back")],
                 None => &[("enter", "start"), ("o", "folder"), ("drop", "folder"), ("↑↓", "scroll"), ("esc", "back")],
             };
-            Line::from(
-                keys.iter()
-                    .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
-                    .collect::<Vec<_>>(),
-            )
+            widgets::key_hints(keys)
         };
         f.render_widget(line, area);
     }
+}
+
+/// Create `dest` if needed and check a file can be written there, before
+/// anything is copied off the iPod.
+fn check_writable(dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    let probe = dest.join(".rpod-write-test");
+    std::fs::write(&probe, b"")?;
+    std::fs::remove_file(&probe)
 }
 
 /// Free space where `dest` is or will be (it may not exist yet).
@@ -422,10 +441,6 @@ fn tilde(p: &Path) -> String {
         Ok(h) if !h.is_empty() && s.starts_with(&h) => format!("~{}", &s[h.len()..]),
         _ => s,
     }
-}
-
-fn size(b: u64) -> String {
-    if b >= 1_000_000_000 { format!("{:.1} GB", b as f64 / 1e9) } else { format!("{:.0} MB", b as f64 / 1e6) }
 }
 
 fn duration(secs: u64) -> String {
@@ -446,7 +461,7 @@ mod tests {
     fn download_screen_snapshot() {
         let (Ok(root), Ok(dest)) = (std::env::var("RPOD_TEST_IPOD"), std::env::var("RPOD_TEST_DEST")) else { return };
         let ipod = crate::device::Ipod::open(Path::new(&root)).unwrap();
-        let mut view = DownloadView::new(root.into(), "Sync all music to PC".into(), ipod.db.tracks.clone());
+        let mut view = DownloadView::new(root.into(), "Sync all music to PC".into(), true, ipod.db.tracks.clone());
         view.dest = dest.into();
         view.replan();
         let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();

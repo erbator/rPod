@@ -123,6 +123,14 @@ impl Settings {
             let _ = std::fs::write(p, serde_json::to_vec_pretty(self).unwrap_or_default());
         }
     }
+
+    /// Change one setting on disk, keeping the rest as saved.
+    pub fn update(change: impl FnOnce(&mut Settings)) -> Settings {
+        let mut s = Self::load();
+        change(&mut s);
+        s.save();
+        s
+    }
 }
 
 // ---------------------------------------------------------------- sources

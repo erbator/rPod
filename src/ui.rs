@@ -1,5 +1,6 @@
 use crate::app::{App, ColKind, Item, Tab};
 use crate::itunesdb::Track;
+use crate::widgets;
 use image::imageops::FilterType;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -22,20 +23,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(f.area());
 
     draw_header(f, app, header);
-    if let Some(view) = &mut app.fix {
-        view.draw(f, Rect { height: body.height + footer.height, ..body });
-    } else if let Some(view) = &mut app.download {
-        view.draw(f, Rect { height: body.height + footer.height, ..body });
-    } else if let Some(view) = &mut app.import {
-        view.draw(f, Rect { height: body.height + footer.height, ..body });
-    }
+    let bar_height = if app.player.now().is_some() { 2 } else { 0 };
     if app.fix.is_some() || app.download.is_some() || app.import.is_some() {
+        let [screen, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)])
+            .areas(Rect { height: body.height + footer.height, ..body });
+        if let Some(view) = &mut app.fix {
+            view.draw(f, screen);
+        } else if let Some(view) = &mut app.download {
+            view.draw(f, screen);
+        } else if let Some(view) = &mut app.import {
+            view.draw(f, screen);
+        }
+        draw_now_playing(f, app, bar);
         if let Some(view) = &mut app.cover {
             view.draw(f, f.area());
         }
         return;
     }
-    let bar_height = if app.player.now().is_some() { 2 } else { 0 };
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(bar_height)]).areas(body);
     let [cols_area, detail_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(DETAIL_WIDTH)]).areas(body);
@@ -382,12 +386,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("/", "filter"),
             ("q", "quit"),
         ];
-        Line::from(
-            keys.iter()
-                .filter(|(k, _)| *k != "c" || app.can_pick_cover())
-                .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
-                .collect::<Vec<_>>(),
-        )
+        widgets::key_hints(keys.iter().filter(|(k, _)| *k != "c" || app.can_pick_cover()))
     };
     f.render_widget(line, area);
 }

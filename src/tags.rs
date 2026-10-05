@@ -26,8 +26,8 @@ pub fn write(path: &Path, e: &TrackEdit) -> Result<()> {
 /// Write everything the iPod knows about `t` into a file copied off it, in
 /// the tags PC players read best: ID3v2.3 for MP3 (Windows and older players
 /// misread v2.4), iTunes atoms for M4A. Leftover ID3v1/APE tags go, so no
-/// player shows stale values from them. `cover` (a JPEG) is only embedded
-/// when the file has no picture of its own, which is usually bigger.
+/// player shows stale values from them. `cover` (a JPEG) replaces the file's
+/// own cover only when that is missing or smaller.
 pub fn write_track(path: &Path, t: &Track, cover: Option<&[u8]>) -> Result<()> {
     let mut file = lofty::read_from_path(path).with_context(|| format!("reading {}", path.display()))?;
     let tag_type = file.primary_tag_type();
@@ -38,7 +38,9 @@ pub fn write_track(path: &Path, t: &Track, cover: Option<&[u8]>) -> Result<()> {
     }
     let tag = file.tag_mut(tag_type).expect("tag inserted above");
     apply(tag, &full_edit(t));
-    if let Some(jpeg) = cover.filter(|_| tag.pictures().is_empty()) {
+    if let Some(jpeg) = cover.filter(|jpeg| own_cover_smaller(tag, jpeg)) {
+        tag.remove_picture_type(PictureType::CoverFront);
+        tag.remove_picture_type(PictureType::Other);
         tag.push_picture(Picture::unchecked(jpeg.to_vec()).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
     }
     let options = WriteOptions::default().use_id3v23(true);
@@ -49,6 +51,23 @@ pub fn write_track(path: &Path, t: &Track, cover: Option<&[u8]>) -> Result<()> {
         tt.remove_from(&mut f, options).with_context(|| format!("removing old tags from {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Whether the file's own front cover is missing or smaller than `jpeg`.
+/// One that can't be measured counts as bigger, so it's kept.
+fn own_cover_smaller(tag: &Tag, jpeg: &[u8]) -> bool {
+    let side = |data: &[u8]| {
+        let reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().ok()?;
+        reader.into_dimensions().ok().map(|(w, h)| w.min(h))
+    };
+    let own = tag
+        .pictures()
+        .iter()
+        // MP4 has no picture types; its covers read back as Other.
+        .filter(|p| matches!(p.pic_type(), PictureType::CoverFront | PictureType::Other))
+        .map(|p| side(p.data()).unwrap_or(u32::MAX))
+        .max();
+    own.is_none_or(|own| side(jpeg).is_some_and(|ours| own < ours))
 }
 
 /// Every tag field set from `t`; empty values clear the field.
@@ -176,6 +195,65 @@ mod tests {
             assert_eq!(t.get_string(ItemKey::AlbumArtist), Some("The Band"), "{name}");
             assert_eq!(t.date().map(|d| d.year), Some(1994), "{name}");
             assert_eq!((t.track(), t.track_total()), (Some(3), Some(10)), "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn jpeg(side: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(side, side, image::Rgb([0, 128, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
+            .unwrap();
+        out
+    }
+
+    /// Needs ffmpeg to make sample files; skipped without it.
+    #[test]
+    fn writes_downloaded_track() {
+        let dir = std::env::temp_dir().join(format!("rpod-track-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = Track {
+            title: "Can I Kick It?".into(),
+            artist: "A Tribe Called Quest".into(),
+            album: "People's Instinctive Travels".into(),
+            album_artist: "A Tribe Called Quest".into(),
+            year: 1990,
+            track_no: 9,
+            track_total: 14,
+            compilation: true,
+            ..Default::default()
+        };
+        for (name, codec) in [("a.mp3", "libmp3lame"), ("b.m4a", "aac")] {
+            let path = dir.join(name);
+            let ok = std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", "-c:a", codec])
+                .args(["-metadata", "title=Old", "-write_id3v1", "1"])
+                .arg(&path)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return;
+            }
+            embed_cover(&path, &jpeg(16)).unwrap();
+            let had_v1 = lofty::read_from_path(&path).unwrap().contains_tag_type(TagType::Id3v1);
+            assert_eq!(had_v1, name.ends_with("mp3"), "{name}");
+            write_track(&path, &t, Some(&jpeg(64))).unwrap();
+            let f = lofty::read_from_path(&path).unwrap();
+            let tag = f.primary_tag().unwrap();
+            assert_eq!(tag.title().as_deref(), Some("Can I Kick It?"), "{name}");
+            assert_eq!(tag.get_string(ItemKey::AlbumArtist), Some("A Tribe Called Quest"), "{name}");
+            assert_eq!((tag.track(), tag.track_total()), (Some(9), Some(14)), "{name}");
+            assert!(tag.get_string(ItemKey::FlagCompilation).is_some(), "{name}");
+            assert_eq!(tag.pictures().len(), 1, "{name}: the small cover is replaced");
+            assert_eq!(tag.pictures()[0].data(), jpeg(64), "{name}");
+            if name.ends_with("mp3") {
+                assert!(!f.contains_tag_type(TagType::Id3v1), "old ID3v1 tag removed");
+                assert_eq!(&std::fs::read(&path).unwrap()[..4], b"ID3\x03", "written as ID3v2.3");
+            }
+            // A smaller cover than the file's own leaves it alone.
+            write_track(&path, &t, Some(&jpeg(32))).unwrap();
+            let f = lofty::read_from_path(&path).unwrap();
+            assert_eq!(f.primary_tag().unwrap().pictures()[0].data(), jpeg(64), "{name}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }

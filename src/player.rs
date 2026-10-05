@@ -6,8 +6,10 @@
 
 use crate::itunesdb::Track;
 use anyhow::{Context, Result};
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,12 @@ pub struct Player {
     at: usize,
     /// Position in `order` of the song queued behind it, if any.
     next: Option<usize>,
+    /// Set to drop the queued song before it starts, when shuffle or repeat
+    /// means a different one should follow.
+    next_stop: Option<Arc<AtomicBool>>,
+    /// Dropped songs still sitting in rodio's queue between the current song
+    /// and `next`; each ends as soon as rodio reaches it.
+    dropped: usize,
     active: bool,
     pub shuffle: bool,
     pub repeat: Repeat,
@@ -50,6 +58,8 @@ impl Player {
             order: Vec::new(),
             at: 0,
             next: None,
+            next_stop: None,
+            dropped: 0,
             active: false,
             shuffle: false,
             repeat: Repeat::Off,
@@ -141,26 +151,29 @@ impl Player {
     }
 
     pub fn toggle_shuffle(&mut self) {
+        self.tick();
         self.shuffle = !self.shuffle;
         if self.queue.is_empty() {
             return;
         }
+        let queued = self.next.map(|n| self.order[n]);
         if self.shuffle {
             self.reshuffle();
         } else {
             self.at = self.order[self.at];
             self.order = (0..self.queue.len()).collect();
         }
-        self.requeue();
+        self.requeue(queued);
     }
 
     pub fn cycle_repeat(&mut self) {
+        self.tick();
         self.repeat = match self.repeat {
             Repeat::Off => Repeat::All,
             Repeat::All => Repeat::One,
             Repeat::One => Repeat::Off,
         };
-        self.requeue();
+        self.requeue(self.next.map(|n| self.order[n]));
     }
 
     /// Stop and let go of the sound device and the open song file (so the
@@ -168,6 +181,8 @@ impl Player {
     pub fn stop(&mut self) {
         self.device = None;
         self.next = None;
+        self.next_stop = None;
+        self.dropped = 0;
         self.active = false;
     }
 
@@ -179,8 +194,10 @@ impl Player {
         }
         let left = out.len();
         let mut changed = false;
-        if left < 1 + self.next.is_some() as usize {
+        if left < 1 + self.next.is_some() as usize + self.dropped {
             changed = true;
+            self.dropped = 0;
+            self.next_stop = None;
             match self.next.take() {
                 // The current song ended and the queued one took over.
                 Some(n) if left > 0 => {
@@ -239,10 +256,12 @@ impl Player {
         out.clear();
         out.set_volume(self.volume as f32 / 100.0);
         self.next = None;
+        self.next_stop = None;
+        self.dropped = 0;
         let mut at = at;
         for _ in 0..self.order.len() {
             match self.load(at) {
-                Ok(()) => {
+                Ok(_) => {
                     self.at = at;
                     self.active = true;
                     self.shown_secs = u64::MAX;
@@ -264,29 +283,54 @@ impl Player {
 
     /// Queue the song after the current one so it starts without a gap.
     fn queue_next(&mut self) {
-        self.next = self.after(self.at, true).filter(|&n| self.load(n).is_ok());
-    }
-
-    /// Restart the current song where it was, so a changed shuffle or repeat
-    /// applies to what's queued behind it.
-    fn requeue(&mut self) {
-        let Some((_, pos, paused)) = self.now() else { return };
-        self.start_at(self.at);
-        self.seek_to(pos);
-        if paused {
-            self.toggle_pause();
+        self.next = None;
+        self.next_stop = None;
+        if let Some(n) = self.after(self.at, true)
+            && let Ok(stop) = self.load(n)
+        {
+            self.next = Some(n);
+            self.next_stop = Some(stop);
         }
     }
 
-    fn load(&self, at: usize) -> Result<()> {
+    /// After shuffle or repeat changed, make sure the right song follows the
+    /// current one, which plays on undisturbed. `queued` is the queue index
+    /// of the song rodio already has lined up.
+    fn requeue(&mut self, queued: Option<usize>) {
+        if !self.active {
+            return;
+        }
+        let want = self.after(self.at, true);
+        if want.map(|n| self.order[n]) == queued {
+            self.next = want;
+            return;
+        }
+        if let Some(stop) = self.next_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+            self.dropped += 1;
+        }
+        self.queue_next();
+    }
+
+    /// Append `order[at]` to rodio's queue. The returned flag, set before the
+    /// song starts, makes it end at once without playing.
+    fn load(&self, at: usize) -> Result<Arc<AtomicBool>> {
         let t = &self.queue[self.order[at]];
         let path = self.root.join(&t.location);
         // Opening reads the file's header on the calling (UI) thread: a few
         // milliseconds normally, longer if the iPod's disk has spun down.
         let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-        let source = Decoder::try_from(file).context("decoding")?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        // Checked once, on the song's first sample: a song already playing
+        // is never cut off.
+        let source = Decoder::try_from(file).context("decoding")?.stoppable().periodic_access(Duration::MAX, move |s| {
+            if flag.load(Ordering::Relaxed) {
+                s.stop();
+            }
+        });
         self.device.as_ref().unwrap().1.append(source);
-        Ok(())
+        Ok(stop)
     }
 }
 
@@ -330,7 +374,7 @@ mod tests {
         let Ok(root) = std::env::var("RPOD_TEST_IPOD") else { return };
         let ipod = crate::device::Ipod::open(std::path::Path::new(&root)).unwrap();
         let tracks: Vec<Track> = ipod.db.tracks.iter().filter(|t| !crate::export::is_video(t)).take(3).cloned().collect();
-        let mut p = Player::new(root.into(), 20);
+        let mut p = Player::new(root.into(), 5);
         p.play(tracks.clone(), 0);
         assert!(p.error.is_none(), "{:?}", p.error);
         std::thread::sleep(Duration::from_secs(2));
@@ -347,6 +391,28 @@ mod tests {
         p.tick();
         println!("after next: {} at {:?}", p.now().unwrap().0.title, p.now().unwrap().1);
         assert_eq!(p.now().unwrap().0.dbid, tracks[1].dbid);
+
+        // Changing repeat or shuffle swaps what's queued, not what's playing.
+        let before = p.now().unwrap().1;
+        p.cycle_repeat();
+        p.cycle_repeat();
+        assert_eq!((p.repeat, p.next, p.dropped), (Repeat::One, Some(p.at), 1));
+        p.toggle_shuffle();
+        std::thread::sleep(Duration::from_millis(500));
+        p.tick();
+        let (t, pos, _) = p.now().unwrap();
+        println!("after repeat one + shuffle: {} at {pos:?}", t.title);
+        assert!(t.dbid == tracks[1].dbid && pos > before);
+
+        // At the end, the dropped songs are passed over for the one queued last.
+        p.cycle_repeat();
+        let want = p.queue[p.order[p.next.unwrap()]].dbid;
+        let length = Duration::from_millis(p.now().unwrap().0.length_ms as u64);
+        p.seek_to(length - Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(2));
+        p.tick();
+        println!("after the song ended: {}, {} dropped left", p.now().unwrap().0.title, p.dropped);
+        assert_eq!((p.now().unwrap().0.dbid, p.dropped), (want, 0));
         p.stop();
         assert!(p.now().is_none());
     }
@@ -367,5 +433,12 @@ mod tests {
         let mut sorted = p.order.clone();
         sorted.sort();
         assert_eq!(sorted, [0, 1, 2, 3, 4]);
+
+        // Turning shuffle off carries on in album order from the same song.
+        p.shuffle = true;
+        p.at = 3;
+        let playing = p.order[3];
+        p.toggle_shuffle();
+        assert_eq!((p.order.clone(), p.at), (vec![0, 1, 2, 3, 4], playing));
     }
 }

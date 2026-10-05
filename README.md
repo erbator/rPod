@@ -139,7 +139,8 @@ change, copy them back into `iPod_Control/iTunes/` and `iPod_Control/Artwork/`.
 
 `Enter` on a song plays it and then the rest of the list it's in: the album,
 playlist, artist or Songs view. The bar above the footer shows what's playing
-and the player keys. Sound goes through ALSA, so PipeWire and PulseAudio work
+and the player keys, which also work on the Add music, download and
+fix-covers screens. Sound goes through ALSA, so PipeWire and PulseAudio work
 as usual. Volume is remembered; ejecting stops playback first so the iPod can
 unmount.
 
@@ -147,14 +148,14 @@ unmount.
 
 `d` copies the selection (a song, album, artist, playlist or marked songs) off
 the iPod; `S` copies the whole library. Files land in `~/Music` by default
-as `Artist/Album/01 Title.mp3`; press `o` or drop a folder on the screen to
-change it, and the choice is remembered.
+as `Artist/Album/01 Title.mp3`, compilations under `Compilations/Album`; press
+`o` or drop a folder on the screen to change it, and the choice is remembered.
 
 Many songs on an iPod have no tags of their own, so every download gets the
 iPod's title, artist, album artist, album, numbers, year, genre and
 compilation flag written in: ID3v2.3 for MP3 (what Windows and older players
-read best), iTunes tags for M4A. Files without a cover get the iPod's
-thumbnail; files with their own cover keep it. Videos stay on the iPod.
+read best), iTunes tags for M4A. Files with no cover, or a smaller one, get the
+iPod's thumbnail; bigger covers are kept. Videos stay on the iPod.
 
 rPod remembers what it downloaded, per iPod and folder, in
 `~/.local/share/rpod/downloads/`. Running it again copies only new songs and

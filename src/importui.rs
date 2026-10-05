@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Gauge, Paragraph, Row, Table, TableState, Wrap};
 use crate::itunesdb::Track;
+use crate::widgets::{self, Input};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,7 +42,7 @@ pub struct ImportView {
     settings: Settings,
     focus: Pane,
     opt: usize,
-    path_input: Option<String>,
+    path_input: Option<Input>,
     scanning: usize,
     scan_tx: Sender<Vec<Item>>,
     scan_rx: Receiver<Vec<Item>>,
@@ -291,25 +292,24 @@ impl ImportView {
         self.message = None;
     }
 
+    /// Whether the folder field is open, so typed keys belong to it.
+    pub fn typing(&self) -> bool {
+        self.path_input.is_some()
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         self.message = None;
         if let Some(input) = &mut self.path_input {
             match key.code {
                 KeyCode::Enter => {
-                    let text = std::mem::take(input);
+                    let path = widgets::expand_home(&input.text());
                     self.path_input = None;
-                    let expanded = match text.trim().strip_prefix("~/") {
-                        Some(rest) => std::env::var("HOME").map(|h| format!("{h}/{rest}")).unwrap_or(text.clone()),
-                        None => text.trim().to_string(),
-                    };
-                    self.on_paste(&expanded);
+                    self.on_paste(&path.to_string_lossy());
                 }
                 KeyCode::Esc => self.path_input = None,
-                KeyCode::Backspace => {
-                    input.pop();
+                _ => {
+                    input.key(key);
                 }
-                KeyCode::Char(c) => input.push(c),
-                _ => {}
             }
             return;
         }
@@ -326,7 +326,7 @@ impl ImportView {
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Pane::Queue { Pane::Options } else { Pane::Queue };
             }
-            KeyCode::Char('o') => self.path_input = Some(String::new()),
+            KeyCode::Char('o') => self.path_input = Some(Input::new("")),
             KeyCode::Char('s') | KeyCode::Enter if self.focus == Pane::Queue => self.start(),
             KeyCode::Char('s') => self.start(),
             _ if self.focus == Pane::Options => self.on_option_key(key),
@@ -561,7 +561,7 @@ impl ImportView {
         }
         let size: u64 = self.items.iter().map(|i| i.estimated_size(s)).sum();
         let free = import::free_space(&self.root);
-        let gb = |b: u64| if b >= 1_000_000_000 { format!("{:.2} GB", b as f64 / 1e9) } else { format!("{:.0} MB", b as f64 / 1e6) };
+        let gb = widgets::size;
 
         let mut lines = vec![
             Line::from(vec![
@@ -625,11 +625,10 @@ impl ImportView {
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let line = if let Some(input) = &self.path_input {
-            Line::from(vec![
-                Span::styled(" path ", Style::new().fg(Color::Black).bg(Color::Yellow)),
-                Span::raw(format!(" {input}▏")),
-                Span::styled("   enter add · esc cancel", Style::new().fg(DIM)),
-            ])
+            let mut spans = vec![Span::styled(" path ", Style::new().fg(Color::Black).bg(Color::Yellow)), Span::raw(" ")];
+            spans.extend(input.spans());
+            spans.push(Span::styled("   enter add · esc cancel", Style::new().fg(DIM)));
+            Line::from(spans)
         } else if let Some(msg) = &self.message {
             Line::from(format!(" {msg}")).fg(Color::Yellow)
         } else if self.running() {
@@ -640,11 +639,7 @@ impl ImportView {
             } else {
                 &[("drop", "add files"), ("o", "path"), ("space", "toggle"), ("d", "remove"), ("c", "cover"), ("C", "find covers"), ("tab", "options"), ("enter", "start"), ("esc", "back")]
             };
-            Line::from(
-                keys.iter()
-                    .flat_map(|(k, d)| [Span::styled(format!(" {k} "), Style::new().fg(ACCENT)), Span::styled(format!("{d} "), Style::new().fg(DIM))])
-                    .collect::<Vec<_>>(),
-            )
+            widgets::key_hints(keys)
         };
         f.render_widget(line, area);
     }

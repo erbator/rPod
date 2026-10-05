@@ -2,7 +2,8 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
+use std::path::PathBuf;
 
 /// A single-line text input with a cursor.
 pub struct Input {
@@ -61,5 +62,41 @@ impl Input {
             Span::styled(at, Style::new().fg(Color::Black).bg(Color::White)),
             Span::styled(after, Style::new().fg(Color::White)),
         ]
+    }
+}
+
+/// A footer of `key description` pairs.
+pub fn key_hints<'a>(keys: impl IntoIterator<Item = &'a (&'a str, &'a str)>) -> Line<'static> {
+    keys.into_iter()
+        .flat_map(|(k, d)| {
+            [Span::styled(format!(" {k} "), Style::new().fg(Color::Cyan)), Span::styled(format!("{d} "), Style::new().fg(Color::DarkGray))]
+        })
+        .collect()
+}
+
+/// A byte count as `850 MB` or `12.6 GB`.
+pub fn size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 { format!("{:.1} GB", bytes as f64 / 1e9) } else { format!("{:.0} MB", bytes as f64 / 1e6) }
+}
+
+/// A typed path, with a leading `~/` meaning the home folder.
+pub fn expand_home(text: &str) -> PathBuf {
+    let text = text.trim();
+    match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(text),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_home() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(expand_home(" ~/Music "), home.join("Music"));
+        assert_eq!(expand_home("/mnt/usb"), PathBuf::from("/mnt/usb"));
+        assert_eq!(expand_home("~user/x"), PathBuf::from("~user/x"));
     }
 }
