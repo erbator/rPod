@@ -5,11 +5,12 @@
 //! survive untouched. It appends to or removes from the track list, the
 //! playlists, the album list (mhla) and the artist list (mhli), and regenerates the master
 //! playlist's sort indexes (mhod 52) and letter jump tables (mhod 53), which
-//! the iPod's Music menus are built from.
+//! the iPod's Music menus are built from. Sorts it can't rebuild keep the
+//! iPod's own order, see [`kept_orders`].
 
 use crate::bytes::{Chunk, utf16le};
 use crate::itunesdb::{ITunesDb, Track};
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
 
 /// A track to add. `id` is assigned by the writer.
@@ -201,6 +202,10 @@ const SORT_ALBUM: u32 = 4;
 const SORT_ARTIST: u32 = 5;
 const SORT_GENRE: u32 = 7;
 const SORT_COMPOSER: u32 = 18;
+const SORT_ALBUM_ARTIST: u32 = 35;
+/// The sorts [`sorted_positions`] rebuilds. Others, such as the TV show
+/// ones (29-31), are carried over by [`kept_orders`].
+const REBUILT: [u32; 6] = [SORT_TITLE, SORT_ALBUM, SORT_ARTIST, SORT_GENRE, SORT_COMPOSER, SORT_ALBUM_ARTIST];
 
 /// Case-insensitive key that files "The Strokes" under S and "A Tribe
 /// Called Quest" under T, as iTunes does.
@@ -249,6 +254,7 @@ fn sorted_positions(tracks: &[&Track], sort: u32) -> Vec<(usize, String)> {
                 SORT_ALBUM => vec![album, title],
                 SORT_ARTIST => vec![artist, album, title],
                 SORT_GENRE => vec![sort_key(&t.genre), artist, album, title],
+                SORT_ALBUM_ARTIST => vec![sort_key(t.sort_artist()), album, title],
                 _ => vec![sort_key(&t.composer), title],
             };
             (i, primary, (t.disc_no, t.track_no))
@@ -257,7 +263,7 @@ fn sorted_positions(tracks: &[&Track], sort: u32) -> Vec<(usize, String)> {
     let mut keyed = keyed;
     keyed.sort_by(|a, b| {
         // Album-based sorts keep disc/track order inside the album.
-        let disc_track_matters = matches!(sort, SORT_ALBUM | SORT_ARTIST | SORT_GENRE);
+        let disc_track_matters = matches!(sort, SORT_ALBUM | SORT_ARTIST | SORT_GENRE | SORT_ALBUM_ARTIST);
         let n = a.1.len() - 1;
         a.1[..n]
             .cmp(&b.1[..n])
@@ -265,6 +271,65 @@ fn sorted_positions(tracks: &[&Track], sort: u32) -> Vec<(usize, String)> {
             .then_with(|| a.1[n].cmp(&b.1[n]))
     });
     keyed.into_iter().map(|(i, k, _)| (i, k.into_iter().next().unwrap_or_default())).collect()
+}
+
+/// The master playlist's indexes for sorts not in [`REBUILT`], in the iPod's
+/// own order: removed tracks drop out, the rest are renumbered and new tracks
+/// go at the end. Each entry keeps its old jump table letter as its key.
+/// Edited tracks keep their old place, so these views can go stale after an
+/// edit that changes what they sort by, until iTunes rebuilds them.
+fn kept_orders(yp: Chunk, remap: &[Option<usize>], added: usize) -> Result<HashMap<u32, Vec<(usize, String)>>> {
+    let mut indexes: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut runs: HashMap<u32, Vec<(u16, usize, usize)>> = HashMap::new();
+    let mut off = yp.off + yp.header_len();
+    for _ in 0..yp.u32(0x0C) {
+        let od = Chunk::at(yp.buf, off)?;
+        od.expect(b"mhod")?;
+        off = od.end();
+        let (ty, sort, n) = (od.u32(0x0C), od.u32(0x18), od.u32(0x1C) as usize);
+        let (first, size) = match ty {
+            52 => (0x48, 4),
+            53 => (0x28, 12),
+            _ => continue,
+        };
+        if REBUILT.contains(&sort) {
+            continue;
+        }
+        let body = od
+            .slice(first, n * size)
+            .filter(|_| first + n * size <= od.total_len())
+            .ok_or_else(|| anyhow!("library index {sort} runs past its end"))?;
+        let words = body.chunks(size).map(|e| u32::from_le_bytes(e[..4].try_into().unwrap()));
+        if ty == 52 {
+            indexes.insert(sort, words.collect());
+        } else {
+            let entry = |e: &[u8]| {
+                let word = |at: usize| u32::from_le_bytes(e[at..at + 4].try_into().unwrap()) as usize;
+                (u16::from_le_bytes([e[0], e[1]]), word(4), word(8))
+            };
+            runs.insert(sort, body.chunks(size).map(entry).collect());
+        }
+    }
+    let kept = remap.iter().flatten().count();
+    let mut orders = HashMap::new();
+    for (sort, index) in indexes {
+        let mut letters = vec!['0' as u16; index.len()];
+        for &(letter, start, count) in runs.get(&sort).into_iter().flatten() {
+            let end = start.saturating_add(count).min(letters.len());
+            letters.get_mut(start..end).into_iter().flatten().for_each(|l| *l = letter);
+        }
+        let mut order = Vec::with_capacity(index.len() + added);
+        for (&pos, &letter) in index.iter().zip(&letters) {
+            match remap.get(pos as usize) {
+                Some(Some(new)) => order.push((*new, String::from_utf16_lossy(&[letter]))),
+                Some(None) => {}
+                None => bail!("library index {sort} lists track {pos} of {}", remap.len()),
+            }
+        }
+        order.extend((kept..kept + added).map(|pos| (pos, String::new())));
+        orders.insert(sort, order);
+    }
+    Ok(orders)
 }
 
 fn index_mhod(sort: u32, order: &[(usize, String)]) -> Vec<u8> {
@@ -649,6 +714,18 @@ pub fn write(
     }
 
     let all: Vec<&Track> = current.iter().filter(|t| !remove.contains(&t.id)).chain(new.iter().map(|t| &t.meta)).collect();
+    // Each existing track's position after the write, None if it's removed.
+    let mut kept = 0;
+    let remap: Vec<Option<usize>> = existing
+        .tracks
+        .iter()
+        .map(|t| {
+            (!remove.contains(&t.id)).then(|| {
+                kept += 1;
+                kept - 1
+            })
+        })
+        .collect();
 
     let mut sections = Vec::new();
     for_each_mhsd(mhbd, |sd| {
@@ -680,7 +757,7 @@ pub fn write(
                 }
                 Builder::from_header(mhlt).finish_list(kept + new.len(), &items)
             }
-            2 | 3 => rewrite_playlists(sd.first_child()?, new, &all, remove)?,
+            2 | 3 => rewrite_playlists(sd.first_child()?, new, &all, &remap, remove)?,
             4 => rewrite_list(sd.first_child()?, b"mhla", &linker.new_albums, &drop_albums)?,
             8 => rewrite_list(sd.first_child()?, b"mhli", &linker.new_artists, &drop_artists)?,
             _ => orig[sd.off + sd.header_len()..sd.end()].to_vec(),
@@ -724,7 +801,13 @@ fn rewrite_list(list: Chunk, tag: &[u8; 4], extra: &[Vec<u8>], drop: &HashSet<u3
     Ok(Builder::from_header(list).finish_list(kept + extra.len(), &items))
 }
 
-fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track], remove: &HashSet<u32>) -> Result<Vec<u8>> {
+fn rewrite_playlists(
+    mhlp: Chunk,
+    new: &[NewTrack],
+    all: &[&Track],
+    remap: &[Option<usize>],
+    remove: &HashSet<u32>,
+) -> Result<Vec<u8>> {
     mhlp.expect(b"mhlp")?;
     let buf = mhlp.buf;
     let mut out = Vec::new();
@@ -735,7 +818,7 @@ fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track], remove: &Has
         if yp.u8(0x14) == 0 && remove.is_empty() {
             out.extend_from_slice(&buf[yp.off..yp.end()]);
         } else {
-            out.extend(rewrite_playlist(yp, new, all, remove)?);
+            out.extend(rewrite_playlist(yp, new, all, remap, remove)?);
         }
         off = yp.end();
     }
@@ -744,21 +827,24 @@ fn rewrite_playlists(mhlp: Chunk, new: &[NewTrack], all: &[&Track], remove: &Has
 
 /// Drop removed tracks' items from a playlist. The master playlist also gets
 /// the new tracks and fresh sort indexes.
-fn rewrite_playlist(yp: Chunk, new: &[NewTrack], all: &[&Track], remove: &HashSet<u32>) -> Result<Vec<u8>> {
+fn rewrite_playlist(
+    yp: Chunk,
+    new: &[NewTrack],
+    all: &[&Track],
+    remap: &[Option<usize>],
+    remove: &HashSet<u32>,
+) -> Result<Vec<u8>> {
     let buf = yp.buf;
     let master = yp.u8(0x14) != 0;
     let mut kids = Vec::new();
     let mut off = yp.off + yp.header_len();
-    let mut orders: HashMap<u32, Vec<(usize, String)>> = HashMap::new();
+    let mut orders = if master { kept_orders(yp, remap, new.len())? } else { HashMap::new() };
     for _ in 0..yp.u32(0x0C) {
         let od = Chunk::at(buf, off)?;
         od.expect(b"mhod")?;
         match od.u32(0x0C) {
             ty @ (52 | 53) if master => {
                 let sort = od.u32(0x18);
-                if ![SORT_TITLE, SORT_ALBUM, SORT_ARTIST, SORT_GENRE, SORT_COMPOSER].contains(&sort) {
-                    bail!("unknown library index sort type {sort}");
-                }
                 let order = orders.entry(sort).or_insert_with(|| sorted_positions(all, sort));
                 kids.extend(if ty == 52 { index_mhod(sort, order) } else { jump_mhod(sort, order) });
             }
@@ -892,6 +978,67 @@ mod tests {
         })
         .unwrap();
         n
+    }
+
+    /// The master playlist's sort indexes (mhod 52), by sort type.
+    fn master_indexes(buf: &[u8]) -> HashMap<u32, Vec<u32>> {
+        let mut out = HashMap::new();
+        for_each_mhsd(Chunk::at(buf, 0).unwrap(), |sd| {
+            if sd.u32(0x0C) != 3 {
+                return Ok(());
+            }
+            let yp = sd.first_child()?.first_child()?;
+            assert_ne!(yp.u8(0x14), 0, "master playlist comes first");
+            let mut off = yp.off + yp.header_len();
+            for _ in 0..yp.u32(0x0C) {
+                let od = Chunk::at(buf, off)?;
+                if od.u32(0x0C) == 52 {
+                    let n = od.u32(0x1C) as usize;
+                    out.insert(od.u32(0x18), (0..n).map(|i| od.u32(0x48 + 4 * i)).collect());
+                }
+                off = od.end();
+            }
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn album_artist_sort_files_compilations_under_album_artist() {
+        let track = |artist: &str, album_artist: &str, album: &str| Track {
+            artist: artist.into(),
+            album_artist: album_artist.into(),
+            album: album.into(),
+            ..Default::default()
+        };
+        let tracks = [track("Abba", "Various Artists", "Mix"), track("Mingus", "", "Ah Um")];
+        let all: Vec<&Track> = tracks.iter().collect();
+        let order = |sort| sorted_positions(&all, sort).iter().map(|(p, _)| *p).collect::<Vec<_>>();
+        assert_eq!(order(SORT_ARTIST), [0, 1]);
+        assert_eq!(order(SORT_ALBUM_ARTIST), [1, 0], "the compilation files under V");
+        assert_eq!(sorted_positions(&all, SORT_ALBUM_ARTIST)[1].1, "various artists");
+    }
+
+    #[test]
+    fn remove_keeps_order_of_sorts_it_cannot_rebuild() {
+        let Some(orig) = sample() else { return };
+        let db = itunesdb::parse(&orig).unwrap();
+        let before = master_indexes(&orig);
+        if before.keys().all(|s| REBUILT.contains(s)) {
+            return;
+        }
+        let remove: HashSet<u32> = db.tracks.iter().step_by(7).map(|t| t.id).collect();
+        let out = remove_tracks(&orig, &db, &remove).unwrap();
+        let after = master_indexes(&out);
+        let ids_in = |buf: &[u8], index: &[u32]| -> Vec<u32> {
+            let tracks = itunesdb::parse(buf).unwrap().tracks;
+            index.iter().map(|&p| tracks[p as usize].id).collect()
+        };
+        for (sort, index) in before.iter().filter(|(s, _)| !REBUILT.contains(s)) {
+            let expected: Vec<u32> = ids_in(&orig, index).into_iter().filter(|id| !remove.contains(id)).collect();
+            assert_eq!(ids_in(&out, &after[sort]), expected, "sort {sort}");
+        }
     }
 
     #[test]

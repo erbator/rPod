@@ -7,7 +7,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use crate::player::Repeat;
-use ratatui::widgets::{Block, BorderType, Cell, LineGauge, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, BorderType, Cell, Clear, LineGauge, Paragraph, Row, Table, TableState, Wrap};
 use ratatui_image::{Resize, StatefulImage};
 
 const ACCENT: Color = Color::Cyan;
@@ -53,6 +53,42 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(view) = &mut app.cover {
         view.draw(f, f.area());
     }
+    if let Some((title, tracks)) = &app.confirm_delete {
+        draw_confirm_delete(f, title, tracks.len(), f.area());
+    }
+}
+
+/// The centered prompt `x` shows before anything is removed from the iPod.
+fn draw_confirm_delete(f: &mut Frame, title: &str, count: usize, screen: Rect) {
+    f.buffer_mut().set_style(screen, Style::new().fg(DIM).remove_modifier(Modifier::BOLD));
+    let w = screen.width.saturating_sub(4).min(60);
+    let h = 6.min(screen.height);
+    let area = Rect {
+        x: screen.x + (screen.width - w) / 2,
+        y: screen.y + (screen.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::Red))
+        .title(Span::styled(" delete ", Style::new().fg(Color::Black).bg(Color::Red)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let what = if count == 1 { "1 song".to_string() } else { format!("{count} songs") };
+    let text = vec![
+        Line::from(format!("Delete {what} from the iPod?")),
+        Line::from(title.to_string()).bold(),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("y", Style::new().fg(ACCENT)),
+            Span::styled(" delete    ", Style::new().fg(DIM)),
+            Span::styled("any other key", Style::new().fg(ACCENT)),
+            Span::styled(" cancel", Style::new().fg(DIM)),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(text).centered().wrap(Wrap { trim: true }), inner);
 }
 
 fn draw_now_playing(f: &mut Frame, app: &App, area: Rect) {
@@ -368,12 +404,6 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" filter ", Style::new().fg(Color::Black).bg(Color::Yellow)),
             Span::raw(format!(" {}▏", app.cols[app.focus].filter)),
             Span::styled("   enter keep · esc clear", Style::new().fg(DIM)),
-        ])
-    } else if let Some((title, tracks)) = &app.confirm_delete {
-        Line::from(vec![
-            Span::styled(" delete ", Style::new().fg(Color::Black).bg(Color::Red)),
-            Span::raw(format!(" {} song(s) from the iPod: {title}?", tracks.len())),
-            Span::styled("   y delete · any other key cancels", Style::new().fg(DIM)),
         ])
     } else if let Some(msg) = &app.status {
         Line::from(format!(" {msg}")).fg(Color::Yellow)
