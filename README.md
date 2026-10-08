@@ -6,8 +6,8 @@
   <p>
     <a href="https://github.com/erbator/rPod/actions"><img src="https://img.shields.io/github/actions/workflow/status/erbator/rPod/ci.yml?branch=master&style=flat-square&label=CI" alt="CI status" /></a>
     <a href="https://github.com/erbator/rPod/releases"><img src="https://img.shields.io/github/v/release/erbator/rPod?style=flat-square" alt="Latest release" /></a>
-    <a href="./LICENSE.md"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square" alt="PolyForm Noncommercial license" /></a>
-    <img src="https://img.shields.io/badge/Rust-1.85+-DEA584?logo=rust&logoColor=white&style=flat-square" alt="Rust 1.85+" />
+    <a href="./LICENSE.md"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache 2.0 license" /></a>
+    <img src="https://img.shields.io/badge/Rust%20code-100%25-DEA584?logo=rust&logoColor=white&style=flat-square" alt="100% Rust code" />
   </p>
 
   <p>
@@ -211,4 +211,4 @@ Built on [ratatui](https://ratatui.rs),
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE.md)
+[Apache License 2.0](LICENSE.md)

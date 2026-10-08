@@ -26,4 +26,4 @@ accepted = [
 
 # rPod's own license (not a third-party one).
 [rpod]
-accepted = ["PolyForm-Noncommercial-1.0.0"]
+accepted = ["Apache-2.0"]

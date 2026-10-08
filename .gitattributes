@@ -1,0 +1,4 @@
+# Exclude installation and release support files from language statistics.
+/install.sh linguist-detectable=false
+/uninstall.sh linguist-detectable=false
+/about.hbs linguist-detectable=false
